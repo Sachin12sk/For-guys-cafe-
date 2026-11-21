@@ -44,7 +44,7 @@ export function ResilientImage({
       referrerPolicy="no-referrer"
       onError={() => setHasError(true)}
       className={className}
-      loading="lazy"
+      decoding="async"
     />
   );
 }

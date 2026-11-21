@@ -113,7 +113,10 @@ function loadStoredMenu(): CafeStoreData {
           ? [defaultCombosCategory, ...parsed.categories]
           : parsed.categories;
       const combos = Array.isArray(parsed.combos)
-        ? parsed.combos
+        ? parsed.combos.map((combo) => ({
+            ...combo,
+            items: Array.isArray(combo.items) ? combo.items : [],
+          }))
         : DEFAULT_CAFE_DATA.combos;
 
       const mergedSettings = {
@@ -146,8 +149,12 @@ function loadStoredMenu(): CafeStoreData {
 
       return {
         settings: mergedSettings,
-        categories,
-        products: parsed.products,
+        categories: categories.filter(
+          (c) => c && typeof c.id === 'string' && typeof c.name === 'string'
+        ),
+        products: parsed.products.filter(
+          (p) => p && typeof p.id === 'string' && typeof p.name === 'string'
+        ),
         combos,
       };
     }

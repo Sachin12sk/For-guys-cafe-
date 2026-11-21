@@ -54,6 +54,8 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,jpg,woff,woff2}'],
+          globIgnores: ['**/src/assets/**'],
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           runtimeCaching: [
             {
@@ -97,16 +99,26 @@ export default defineConfig(() => {
       {
         name: 'copy-unbundled-src-assets',
         apply: 'build',
+        configResolved(config) {
+          (this as unknown as { _outDir?: string })._outDir = config.build.outDir;
+        },
         closeBundle(error?: Error): void {
           if (error) {
             return;
           }
-          const distDir = path.resolve(__dirname, 'dist');
+          const outDirName =
+            (this as unknown as { _outDir?: string })._outDir || 'dist';
+          const distDir = path.resolve(__dirname, outDirName);
           const srcAssets = path.resolve(__dirname, 'src/assets');
           const distAssets = path.resolve(distDir, 'src/assets');
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, { recursive: true, force: true });
           }
+          const builtIndex = path.join(distDir, 'index.html');
+          if (fs.existsSync(builtIndex)) {
+            fs.copyFileSync(builtIndex, path.join(distDir, '404.html'));
+          }
+          fs.writeFileSync(path.join(distDir, '.nojekyll'), '');
         },
       },
     ],
