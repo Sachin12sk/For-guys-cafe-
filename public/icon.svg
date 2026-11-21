@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="FOUR GUYS CAFE Icon">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D94832" />
+      <stop offset="100%" stop-color="#A82C1C" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bgGrad)" />
+  <rect x="28" y="28" width="456" height="456" rx="88" fill="none" stroke="#FAF9F6" stroke-opacity="0.22" stroke-width="6" />
+  <!-- Royal Pizza Crown -->
+  <path d="M132 196 L168 124 L224 166 L256 106 L288 166 L344 124 L380 196 Z" fill="#FBBF24" />
+  <rect x="132" y="206" width="248" height="26" rx="10" fill="#FBBF24" />
+  <!-- Stylized 4G Cafe Emblem -->
+  <text x="256" y="346" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="900" font-size="136" letter-spacing="-4" fill="#FAF9F6">4G</text>
+  <text x="256" y="408" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="38" letter-spacing="6" fill="#FDE68A">CAFE</text>
+</svg>
