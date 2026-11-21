@@ -30,7 +30,128 @@
     />
   </head>
   <body class="bg-[#FAF9F6] text-stone-900 antialiased selection:bg-[#C83E2B]/15 selection:text-[#C83E2B]">
-    <div id="root"></div>
+    <div id="root">
+      <div
+        style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#FAF9F6;color:#1C1917;font-family:system-ui,-apple-system,sans-serif;text-align:center"
+      >
+        <div style="max-width:400px">
+          <div style="font-weight:800;font-size:20px;letter-spacing:-0.02em">FOUR GUYS CAFE</div>
+          <p style="margin-top:8px;font-size:14px;color:#57534E">Loading QR Menu…</p>
+        </div>
+      </div>
+    </div>
+    <noscript>
+      <div style="padding:24px;text-align:center;font-family:system-ui,sans-serif;background:#FAF9F6;color:#1C1917">
+        <strong>FOUR GUYS CAFE</strong> requires JavaScript enabled to browse the menu and place WhatsApp orders.
+      </div>
+    </noscript>
+    <script>
+      (function () {
+        window.__FOUR_GUYS_MOUNTED__ = false;
+        var shown = false;
+
+        function escapeHtml(str) {
+          return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+        }
+
+        function showBootError(reason) {
+          if (window.__FOUR_GUYS_MOUNTED__ || shown) return;
+          shown = true;
+          var root = document.getElementById('root');
+          if (!root) return;
+          var isRawSource = /main\.tsx/i.test(String(reason || ''));
+          var hint = isRawSource
+            ? 'GitHub Pages is serving raw source index.html instead of the built dist/ bundle. Enable Settings -> Pages -> Source: GitHub Actions.'
+            : 'Please clear cached offline files and reload.';
+          root.innerHTML =
+            '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#FAF9F6;color:#1C1917;font-family:system-ui,-apple-system,sans-serif">' +
+              '<div style="width:100%;max-width:440px;background:#FFFFFF;border:1px solid #E7E5E4;border-radius:20px;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.06);text-align:center">' +
+                '<div style="font-weight:800;font-size:20px;color:#1C1917">FOUR GUYS CAFE</div>' +
+                '<p style="margin:10px 0 0;font-size:14px;color:#44403C;line-height:1.5">Unable to start the QR Menu cleanly. ' + escapeHtml(hint) + '</p>' +
+                '<p style="margin:12px 0 0;padding:10px;border-radius:12px;background:#F5F5F4;border:1px solid #E7E5E4;font-size:12px;color:#57534E;word-break:break-word">' +
+                  escapeHtml(reason || 'Application bundle did not initialize.') +
+                '</p>' +
+                '<div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">' +
+                  '<button id="fg-clear-cache-btn" type="button" style="flex:1;min-width:160px;min-height:44px;padding:10px 14px;border-radius:12px;border:none;background:#C83E2B;color:#FFFFFF;font-weight:700;font-size:13px;cursor:pointer">Clear Cache &amp; Reload</button>' +
+                  '<button id="fg-reset-data-btn" type="button" style="flex:1;min-width:160px;min-height:44px;padding:10px 14px;border-radius:12px;border:1px solid #D6D3D1;background:#FFFFFF;color:#1C1917;font-weight:700;font-size:13px;cursor:pointer">Reset Menu Cache</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+
+          var clearBtn = document.getElementById('fg-clear-cache-btn');
+          if (clearBtn) {
+            clearBtn.onclick = function () {
+              Promise.resolve()
+                .then(function () {
+                  if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+                    return navigator.serviceWorker.getRegistrations().then(function (regs) {
+                      return Promise.all(regs.map(function (r) { return r.unregister(); }));
+                    });
+                  }
+                })
+                .then(function () {
+                  if ('caches' in window && caches.keys) {
+                    return caches.keys().then(function (keys) {
+                      return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                    });
+                  }
+                })
+                .catch(function () {})
+                .finally(function () {
+                  window.location.reload();
+                });
+            };
+          }
+
+          var resetBtn = document.getElementById('fg-reset-data-btn');
+          if (resetBtn) {
+            resetBtn.onclick = function () {
+              try {
+                localStorage.removeItem('four_guys_cafe_menu_v3');
+              } catch (e) {}
+              if (clearBtn) {
+                clearBtn.click();
+              } else {
+                window.location.reload();
+              }
+            };
+          }
+        }
+
+        window.__FOUR_GUYS_SHOW_BOOT_ERROR__ = showBootError;
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (window.__FOUR_GUYS_MOUNTED__) return;
+            var target = event && event.target;
+            if (target && target !== window && target.tagName === 'SCRIPT') {
+              showBootError('Failed to load script: ' + (target.src || target.getAttribute('src') || 'module bundle'));
+              return;
+            }
+            if (event && event.message) {
+              showBootError(event.message);
+            }
+          },
+          true
+        );
+
+        window.addEventListener('unhandledrejection', function (event) {
+          if (window.__FOUR_GUYS_MOUNTED__) return;
+          var reason = event && event.reason;
+          showBootError((reason && reason.message) || String(reason || 'Unhandled startup rejection'));
+        });
+
+        setTimeout(function () {
+          if (!window.__FOUR_GUYS_MOUNTED__) {
+            showBootError('Startup timed out before the menu initialized.');
+          }
+        }, 6500);
+      })();
+    </script>
     <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>

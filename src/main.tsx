@@ -4,6 +4,13 @@ import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import './index.css';
 
+declare global {
+  interface Window {
+    __FOUR_GUYS_MOUNTED__?: boolean;
+    __FOUR_GUYS_SHOW_BOOT_ERROR__?: (reason: string) => void;
+  }
+}
+
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   try {
     registerSW({
@@ -19,9 +26,18 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
 
 const rootElement = document.getElementById('root');
 if (rootElement) {
-  createRoot(rootElement).render(
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  );
+  try {
+    createRoot(rootElement).render(
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    );
+    window.__FOUR_GUYS_MOUNTED__ = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('FOUR GUYS CAFE failed to mount:', err);
+    if (typeof window.__FOUR_GUYS_SHOW_BOOT_ERROR__ === 'function') {
+      window.__FOUR_GUYS_SHOW_BOOT_ERROR__(msg);
+    }
+  }
 }

@@ -169,9 +169,15 @@ function loadStoredRatings(): CafeRatingRecord[] {
     const raw = localStorage.getItem(RATINGS_STORAGE_KEY);
     if (raw === null) return DEFAULT_STARTER_RATINGS;
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? (parsed as CafeRatingRecord[])
-      : DEFAULT_STARTER_RATINGS;
+    if (!Array.isArray(parsed)) return DEFAULT_STARTER_RATINGS;
+    return parsed.filter(
+      (r): r is CafeRatingRecord =>
+        Boolean(r) &&
+        typeof r.id === 'string' &&
+        typeof r.authorName === 'string' &&
+        typeof r.stars === 'number' &&
+        typeof r.comment === 'string'
+    );
   } catch {
     return DEFAULT_STARTER_RATINGS;
   }
@@ -306,7 +312,15 @@ function loadStoredCart(key: string): CartItem[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((item) => item && item.product && typeof item.quantity === 'number')
+      .filter(
+        (item) =>
+          item &&
+          item.product &&
+          typeof item.product.id === 'string' &&
+          typeof item.product.name === 'string' &&
+          typeof item.product.price === 'number' &&
+          typeof item.quantity === 'number'
+      )
       .map((item, idx) => ({
         id:
           typeof item.id === 'string' && item.id
@@ -360,7 +374,23 @@ function loadStoredHomeProfiles(): Record<string, SavedHomeCustomerProfile> {
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, SavedHomeCustomerProfile>;
+      const sanitized: Record<string, SavedHomeCustomerProfile> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (v && typeof v === 'object') {
+          const prof = v as Partial<SavedHomeCustomerProfile>;
+          sanitized[k] = {
+            gmail: typeof prof.gmail === 'string' ? prof.gmail : k,
+            customerName: typeof prof.customerName === 'string' ? prof.customerName : '',
+            alternatePhone: typeof prof.alternatePhone === 'string' ? prof.alternatePhone : '',
+            wardArea: typeof prof.wardArea === 'string' ? prof.wardArea : '',
+            geoLocationUrl: typeof prof.geoLocationUrl === 'string' ? prof.geoLocationUrl : '',
+            customerNote: typeof prof.customerNote === 'string' ? prof.customerNote : '',
+            lastItems: Array.isArray(prof.lastItems) ? prof.lastItems : [],
+            lastOrderAt: typeof prof.lastOrderAt === 'string' ? prof.lastOrderAt : '',
+          };
+        }
+      }
+      return sanitized;
     }
   } catch {
     // Ignore
@@ -368,12 +398,18 @@ function loadStoredHomeProfiles(): Record<string, SavedHomeCustomerProfile> {
   return {};
 }
 
-function loadStoredOrders<T>(key: string): T[] {
+function loadStoredOrders<T extends { items?: unknown[] }>(key: string): T[] {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')
+      .map((o) => ({
+        ...o,
+        items: Array.isArray(o.items) ? o.items : [],
+      })) as T[];
   } catch {
     return [];
   }
