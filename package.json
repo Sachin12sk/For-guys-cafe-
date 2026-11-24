@@ -49,9 +49,10 @@
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.28.0",
+    "lru-cache": "^11.5.3",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
+    "typescript": "~6.0.3",
     "vite-plugin-pwa": "^2.0.0"
   }
 }
