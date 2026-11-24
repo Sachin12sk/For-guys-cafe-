@@ -30,7 +30,7 @@ import {
   sanitizeSettingsForExport,
   type SanitizedMenuExport,
 } from '../utils/storage';
-import { saveCustomerOrderSummary, type SaveVerifiedOrderInput } from './customerAuth';
+import type { SaveCloudOrderInput } from './customerAuth';
 
 export const PENDING_CLOUD_SYNC_STORAGE_KEY = 'four_guys_cafe_pending_sync_v1';
 
@@ -501,7 +501,7 @@ export type PendingCloudSyncItem =
   | {
       kind: 'order';
       recordId: string;
-      payload: SaveVerifiedOrderInput;
+      payload: SaveCloudOrderInput;
       enqueuedAt: number;
     }
   | {
@@ -565,14 +565,13 @@ export function enqueuePendingSyncItem(
 
 export async function flushPendingSyncQueue(params: {
   queue: PendingCloudSyncItem[];
-  authUser: User | null;
   adminUser: User | null;
   isOnline: boolean;
 }): Promise<{
   remaining: PendingCloudSyncItem[];
   flushedCount: number;
 }> {
-  const { queue, authUser, adminUser, isOnline } = params;
+  const { queue, adminUser, isOnline } = params;
   if (!isOnline || queue.length === 0) {
     return { remaining: queue, flushedCount: 0 };
   }
@@ -583,48 +582,37 @@ export async function flushPendingSyncQueue(params: {
   for (const item of queue) {
     try {
       if (item.kind === 'order') {
-        if (!authUser || !authUser.phoneNumber) {
-          remaining.push(item);
-          continue;
-        }
-        await saveCustomerOrderSummary(authUser, item.payload);
+        // Legacy OTP-gated queued item; skip without blocking other items
         flushedCount += 1;
         continue;
       }
 
       if (item.kind === 'review') {
-        const actor = authUser?.phoneNumber ? authUser : adminUser;
-        if (!actor) {
+        if (!adminUser) {
           remaining.push(item);
           continue;
         }
-        await saveCloudReview(actor, item.payload, !authUser?.phoneNumber && Boolean(adminUser));
+        await saveCloudReview(adminUser, item.payload, true);
         flushedCount += 1;
         continue;
       }
 
       if (item.kind === 'vibeSnap') {
-        const actor = authUser?.phoneNumber ? authUser : adminUser;
-        if (!actor) {
+        if (!adminUser) {
           remaining.push(item);
           continue;
         }
-        await saveCloudVibeSnap(actor, item.payload, !authUser?.phoneNumber && Boolean(adminUser));
+        await saveCloudVibeSnap(adminUser, item.payload, true);
         flushedCount += 1;
         continue;
       }
 
       if (item.kind === 'referral') {
-        const actor = authUser?.phoneNumber ? authUser : adminUser;
-        if (!actor) {
+        if (!adminUser) {
           remaining.push(item);
           continue;
         }
-        await saveCloudReferralRecord(
-          actor,
-          item.payload,
-          !authUser?.phoneNumber && Boolean(adminUser)
-        );
+        await saveCloudReferralRecord(adminUser, item.payload, true);
         flushedCount += 1;
         continue;
       }

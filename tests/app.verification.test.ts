@@ -16,12 +16,10 @@ import {
 } from '../src/utils/storage';
 import {
   buildDeterministicOrderDocId,
-  clearCustomerGpsPin,
   computeCartSubmissionFingerprint,
   createUniqueOrderCode,
   getInitialCustomerPaymentStatus,
   hasAdminFirebaseAuthorization,
-  mapPhoneAuthError,
   normalizeCustomerPhone,
   normalizeOrderStatus,
   parseItemsSummaryToOrderLineItems,
@@ -234,7 +232,7 @@ test('A.7 Dine-In WhatsApp receipt uses customerPhone when attached and generic 
   assert.ok(urlWalkIn.startsWith('https://wa.me/?text='));
 });
 
-test('B Mobile phone normalization & OTP error mapping (wrong OTP, expired OTP, network, billing)', () => {
+test('B Mobile phone normalization & zero-OTP Guest Checkout verification', () => {
   const valid10 = normalizeCustomerPhone('9651008080');
   assert.equal(valid10.valid, true);
   assert.equal(valid10.e164, '+919651008080');
@@ -253,26 +251,40 @@ test('B Mobile phone normalization & OTP error mapping (wrong OTP, expired OTP, 
   const invalidStart = normalizeCustomerPhone('1234567890');
   assert.equal(invalidStart.valid, false);
 
-  assert.match(
-    mapPhoneAuthError({ code: 'auth/invalid-verification-code' }),
-    /गलत OTP/
+  const rootDir = path.resolve(process.cwd());
+  assert.equal(
+    fs.existsSync(path.join(rootDir, 'src/components/PhoneAuthModal.tsx')),
+    false
   );
-  assert.match(
-    mapPhoneAuthError({ code: 'auth/code-expired' }),
-    /Expire/
+
+  const filesToAudit = [
+    'src/App.tsx',
+    'src/components/HomeOrderDrawer.tsx',
+    'src/components/BasketDrawer.tsx',
+    'src/services/customerAuth.ts',
+    'src/services/cloudSync.ts',
+  ];
+  for (const relPath of filesToAudit) {
+    const content = fs.readFileSync(path.join(rootDir, relPath), 'utf8');
+    assert.equal(content.includes('RecaptchaVerifier'), false);
+    assert.equal(content.includes('signInWithPhoneNumber'), false);
+    assert.equal(content.includes('sendRealSmsOtp'), false);
+    assert.equal(content.includes('confirmSmsOtp'), false);
+    assert.equal(content.includes('mapPhoneAuthError'), false);
+    assert.equal(content.includes('Send OTP'), false);
+    assert.equal(content.includes('Verify OTP'), false);
+    assert.equal(content.includes('Resend OTP'), false);
+    assert.equal(content.includes('Mobile OTP Login'), false);
+    assert.equal(content.includes('Verify via OTP'), false);
+  }
+
+  // Guest Checkout mobile number & delivery address remain intact
+  const homeDrawerSrc = fs.readFileSync(
+    path.join(rootDir, 'src/components/HomeOrderDrawer.tsx'),
+    'utf8'
   );
-  assert.match(
-    mapPhoneAuthError({ code: 'auth/network-request-failed' }),
-    /नेटवर्क/
-  );
-  assert.match(
-    mapPhoneAuthError({ code: 'auth/billing-not-enabled' }),
-    /Blaze/
-  );
-  assert.match(
-    mapPhoneAuthError({ code: 'auth/operation-not-allowed' }),
-    /Enable/
-  );
+  assert.match(homeDrawerSrc, /details\.alternatePhone/);
+  assert.match(homeDrawerSrc, /details\.deliveryAddress/);
 });
 
 test('B.7 CloudOrder summary parser reconstructs OrderLineItem entries accurately', () => {
@@ -507,8 +519,8 @@ test('Location C.3 & C.4: Address saving, sanitization, legacy wardArea migratio
   });
 });
 
-test('Verification 2, 6, 7 & 8: Clear GPS pin helper, CSV/PDF reports, Dine-In bill, and cross-customer Firestore rules', async () => {
-  assert.equal(typeof clearCustomerGpsPin, 'function');
+test('Verification 2, 6, 7 & 8: Clear GPS pin sanitization, CSV/PDF reports, Dine-In bill, and cross-customer Firestore rules', async () => {
+  assert.equal(sanitizeGpsLocationUrl(''), '');
 
   // 1) Dine-In & Cart safeguards
   const dineInText = buildWhatsappOrderText(

@@ -18,8 +18,6 @@ import {
   ExternalLink,
   ArrowUpDown,
   Store,
-  Phone,
-  ShieldCheck,
 } from 'lucide-react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
@@ -50,8 +48,6 @@ import type {
   CafeStoreData,
   CartItem,
   ComboSet,
-  CustomerCloudOrder,
-  CustomerCloudProfile,
   HomeOrderDetails,
   HomeOrderRecord,
   LoyaltyState,
@@ -67,24 +63,18 @@ import type {
   TableOrderRecord,
   VibeSnapRecord,
 } from './types';
-import { adminAuth, auth, testConnection } from './firebase';
+import { adminAuth, testConnection } from './firebase';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import {
   buildDeterministicOrderDocId,
-  clearCustomerGpsPin,
   computeCartSubmissionFingerprint,
   consumeAdminRedirectLogin,
   createUniqueOrderCode,
   deleteAdminCloudOrder,
-  extractLocal10FromE164,
-  formatPhoneDisplay,
   loginAdminCloudWithGoogle,
   logoutAdminCloud,
   normalizeOrderStatus,
-  saveCustomerOrderSummary,
   subscribeAdminCloudOrders,
-  subscribeCustomerOrders,
-  subscribeCustomerProfile,
   toggleAdminCloudOrderFlag,
   updateAdminCloudOrderStatus,
   verifyAdminCloudAuthorization,
@@ -138,7 +128,6 @@ import { ResilientImage } from './components/ResilientImage';
 import { PostOrderRatingModal } from './components/PostOrderRatingModal';
 import { SpinWinModal } from './components/SpinWinModal';
 import { SnapModal } from './components/SnapModal';
-import { PhoneAuthModal } from './components/PhoneAuthModal';
 import { RatingsAndVibeSection } from './components/RatingsAndVibeSection';
 import {
   PWAInstallButton,
@@ -612,13 +601,6 @@ export default function App() {
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [isSpinWinOpen, setIsSpinWinOpen] = useState(false);
   const [isSnapOpen, setIsSnapOpen] = useState(false);
-  const [isPhoneAuthOpen, setIsPhoneAuthOpen] = useState(false);
-  const [authUser, setAuthUser] = useState<User | null>(null);
-  const [customerProfile, setCustomerProfile] =
-    useState<CustomerCloudProfile | null>(null);
-  const [customerCloudOrders, setCustomerCloudOrders] = useState<
-    CustomerCloudOrder[]
-  >([]);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
   const [proactiveWarningDismissed, setProactiveWarningDismissed] =
     useState(false);
@@ -838,97 +820,10 @@ export default function App() {
     };
   }, []);
 
-  // Validate Firestore connectivity on startup & track Firebase Phone Auth session
+  // Validate Firestore connectivity on startup
   useEffect(() => {
     void testConnection();
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setAuthUser(user);
-      if (!user) {
-        setCustomerProfile(null);
-        setCustomerCloudOrders([]);
-        return;
-      }
-      const verified10 = extractLocal10FromE164(user.phoneNumber);
-      if (verified10) {
-        setHomeDetails((prev) =>
-          prev.alternatePhone === verified10
-            ? prev
-            : { ...prev, alternatePhone: verified10 }
-        );
-        setDineInPhone((prev) => (prev.trim() ? prev : verified10));
-      }
-    });
-    return () => unsubscribe();
   }, []);
-
-  // Subscribe to authenticated customer's private profile & order history (only when signed in)
-  useEffect(() => {
-    if (!authUser || !authUser.phoneNumber) return;
-    const unsubProfile = subscribeCustomerProfile(
-      authUser.uid,
-      (profile) => {
-        setCustomerProfile(profile);
-        if (profile) {
-          const verified10 = extractLocal10FromE164(
-            profile.phoneNumber || authUser.phoneNumber
-          );
-          const profileSplit = splitLegacyWardArea(
-            profile.wardArea || '',
-            profile.ward,
-            profile.area
-          );
-          setHomeDetails((prev) => {
-            const nextWard = prev.ward?.trim() ? prev.ward : profileSplit.ward;
-            const nextArea = prev.area?.trim() ? prev.area : profileSplit.area;
-            const nextWardArea = prev.wardArea.trim()
-              ? prev.wardArea
-              : composeWardAreaLabel({
-                  ward: nextWard,
-                  area: nextArea,
-                  wardArea: profile.wardArea,
-                });
-            return {
-              gmail: prev.gmail.trim() ? prev.gmail : profile.gmail || '',
-              customerName: prev.customerName.trim()
-                ? prev.customerName
-                : profile.customerName || '',
-              alternatePhone: verified10 || prev.alternatePhone,
-              ward: nextWard,
-              area: nextArea,
-              wardArea: nextWardArea,
-              deliveryAddress: prev.deliveryAddress?.trim()
-                ? prev.deliveryAddress
-                : profile.deliveryAddress || '',
-              geoLocationUrl: sanitizeGpsLocationUrl(prev.geoLocationUrl)
-                ? sanitizeGpsLocationUrl(prev.geoLocationUrl)
-                : sanitizeGpsLocationUrl(profile.geoLocationUrl),
-              customerNote: prev.customerNote.trim()
-                ? prev.customerNote
-                : profile.customerNote || '',
-            };
-          });
-        }
-      },
-      (err) => {
-        console.warn('Customer profile subscription error:', err.message);
-      }
-    );
-
-    const unsubOrders = subscribeCustomerOrders(
-      authUser.uid,
-      (orders) => {
-        setCustomerCloudOrders(orders);
-      },
-      (err) => {
-        console.warn('Customer orders subscription error:', err.message);
-      }
-    );
-
-    return () => {
-      unsubProfile();
-      unsubOrders();
-    };
-  }, [authUser]);
 
   // Track isolated Admin Cloud Auth session & verify Firebase Custom Claims / Admin Role
   useEffect(() => {
@@ -968,10 +863,6 @@ export default function App() {
   nativeBackHandlerRef.current = () => {
     if (ratingPrompt) {
       setRatingPrompt(null);
-      return;
-    }
-    if (isPhoneAuthOpen) {
-      setIsPhoneAuthOpen(false);
       return;
     }
     if (isAdminOpen) {
@@ -1037,7 +928,6 @@ export default function App() {
         if (pendingSyncQueue.length > 0 && isOnline) {
           void flushPendingSyncQueue({
             queue: pendingSyncQueue,
-            authUser,
             adminUser: adminCloudUser,
             isOnline: true,
           }).then(({ remaining, flushedCount }) => {
@@ -1088,7 +978,7 @@ export default function App() {
       cleanupBack();
       cleanupLifecycle();
     };
-  }, [authUser, adminCloudUser, isOnline, pendingSyncQueue]);
+  }, [adminCloudUser, isOnline, pendingSyncQueue]);
 
   useEffect(() => {
     if (!adminCloudUser) return;
@@ -1183,7 +1073,6 @@ export default function App() {
     let cancelled = false;
     void flushPendingSyncQueue({
       queue: pendingSyncQueue,
-      authUser,
       adminUser: adminCloudUser,
       isOnline,
     }).then(({ remaining, flushedCount }) => {
@@ -1194,7 +1083,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [isOnline, authUser, adminCloudUser, pendingSyncQueue]);
+  }, [isOnline, adminCloudUser, pendingSyncQueue]);
 
   const mergedAdminHomeOrders = useMemo(
     () =>
@@ -1793,14 +1682,6 @@ export default function App() {
       });
     }
 
-    if (authUser && authUser.phoneNumber) {
-      setCustomerProfile((prev) =>
-        prev ? { ...prev, geoLocationUrl: '' } : prev
-      );
-      void clearCustomerGpsPin(authUser, homeDetails).catch((err) => {
-        console.warn('Firestore GPS pin clear skipped:', err);
-      });
-    }
   };
 
   const recordOrderLoyalty = (params: {
@@ -1851,7 +1732,7 @@ export default function App() {
       const refCodeUpper = params.verifiedReferralCode.trim().toUpperCase();
       const newRec: ReferralRecord = {
         id: `reford-${params.orderCode.replace(/[^a-zA-Z0-9_-]/g, '')}`,
-        customerUid: authUser?.uid || adminCloudUser?.uid,
+        customerUid: adminCloudUser?.uid,
         orderCode: params.orderCode,
         orderMode: params.orderMode,
         referralCode: refCodeUpper,
@@ -1870,14 +1751,9 @@ export default function App() {
         return [newRec, ...prevRefs];
       });
 
-      const actor = authUser?.phoneNumber ? authUser : adminCloudUser;
-      if (actor) {
+      if (adminCloudUser) {
         if (isOnline) {
-          void saveCloudReferralRecord(
-            actor,
-            newRec,
-            !authUser?.phoneNumber && Boolean(adminCloudUser)
-          ).catch(() => {
+          void saveCloudReferralRecord(adminCloudUser, newRec, true).catch(() => {
             setPendingSyncQueue((q) =>
               enqueuePendingSyncItem(q, {
                 kind: 'referral',
@@ -1987,7 +1863,7 @@ export default function App() {
       orderMode: 'dine-in',
       items: lineItems,
       totalAmount: netNewOrderAmount,
-      identityKey: tableNumber.trim() || authUser?.uid || 'table',
+      identityKey: tableNumber.trim() || dineInPhone.trim() || 'table',
     });
     const now = Date.now();
     if (
@@ -2019,7 +1895,7 @@ export default function App() {
     );
     const deterministicDocId = buildDeterministicOrderDocId(
       orderCode,
-      authUser?.uid || 'local'
+      dineInPhone.trim() || 'guest'
     );
 
     const refSpinsSetting = Math.max(
@@ -2054,7 +1930,7 @@ export default function App() {
       : { valid: false, normalized: '' };
     const resolvedDineInPhone = phoneValidation.valid
       ? phoneValidation.normalized
-      : rawPhoneInput || extractLocal10FromE164(authUser?.phoneNumber) || undefined;
+      : rawPhoneInput || undefined;
 
     const record: TableOrderRecord = {
       id: `tbl-${deterministicDocId}`,
@@ -2078,7 +1954,6 @@ export default function App() {
       referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
       orderStatus: 'pending',
       sourcePlatform: getActiveOrderPlatform(),
-      cloudDocId: authUser?.phoneNumber ? deterministicDocId : undefined,
       idempotencyKey: deterministicDocId,
     };
 
@@ -2111,55 +1986,6 @@ export default function App() {
       defaultName: tableNumber.trim() ? `Guest (${tableNumber.trim()})` : '',
       earnedPoints,
     });
-
-    if (authUser && authUser.phoneNumber) {
-      const cloudPayload = {
-        orderCode: record.orderCode,
-        orderMode: 'dine-in' as const,
-        items: lineItems,
-        alternatePhone: resolvedDineInPhone,
-        tableNumber: record.tableNumber,
-        customerNote: record.customerNote,
-        pointsRedeemed: appliedPointsRedeemed,
-        pointsDiscount: appliedPointsDiscount,
-        paymentMethod: safePaymentMethod,
-        paymentStatus: safePaymentStatus,
-        upiRefNote: safeUpiRefNote,
-        totalAmount: record.newOrderAmount,
-        sessionTotalAmount: record.sessionTotalAmount,
-        previouslySentCount: record.previouslySentCount,
-        isFlagged: record.isFlagged,
-        flagReason: record.flagReason,
-        referralCodeUsed: record.referralCodeUsed,
-        referralSpinsAwarded: record.referralSpinsAwarded,
-        orderStatus: 'pending' as const,
-        sourcePlatform: getActiveOrderPlatform(),
-        cloudDocId: deterministicDocId,
-        idempotencyKey: deterministicDocId,
-      };
-      if (isOnline) {
-        void saveCustomerOrderSummary(authUser, cloudPayload).catch((err) => {
-          console.warn('Cloud order queued for retry:', err);
-          setPendingSyncQueue((q) =>
-            enqueuePendingSyncItem(q, {
-              kind: 'order',
-              recordId: deterministicDocId,
-              payload: cloudPayload,
-              enqueuedAt: Date.now(),
-            })
-          );
-        });
-      } else {
-        setPendingSyncQueue((q) =>
-          enqueuePendingSyncItem(q, {
-            kind: 'order',
-            recordId: deterministicDocId,
-            payload: cloudPayload,
-            enqueuedAt: Date.now(),
-          })
-        );
-      }
-    }
   };
 
   const handleRecordHomeOrder = (meta: CheckoutSubmissionMeta) => {
@@ -2207,7 +2033,6 @@ export default function App() {
       items: lineItems,
       totalAmount,
       identityKey:
-        authUser?.uid ||
         homeDetails.alternatePhone ||
         normGmail ||
         homeDetails.customerName ||
@@ -2239,7 +2064,7 @@ export default function App() {
     );
     const deterministicDocId = buildDeterministicOrderDocId(
       orderCode,
-      authUser?.uid || 'local'
+      homeDetails.alternatePhone || normGmail || 'guest'
     );
 
     const refSpinsSetting = Math.max(
@@ -2309,7 +2134,6 @@ export default function App() {
       referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
       orderStatus: 'pending',
       sourcePlatform: getActiveOrderPlatform(),
-      cloudDocId: authUser?.phoneNumber ? deterministicDocId : undefined,
       idempotencyKey: deterministicDocId,
     };
 
@@ -2374,60 +2198,6 @@ export default function App() {
       defaultName: homeDetails.customerName.trim(),
       earnedPoints,
     });
-
-    if (authUser && authUser.phoneNumber) {
-      const cloudPayload = {
-        orderCode: record.orderCode,
-        orderMode: 'home' as const,
-        items: lineItems,
-        customerName: record.customerName,
-        alternatePhone: record.alternatePhone,
-        gmail: record.gmail,
-        ward: cleanWard,
-        area: cleanArea,
-        wardArea: record.wardArea,
-        deliveryAddress: cleanDeliveryAddress,
-        geoLocationUrl: record.geoLocationUrl,
-        customerNote: record.customerNote,
-        deliveryFee: record.deliveryFee,
-        pointsRedeemed: appliedPointsRedeemed,
-        pointsDiscount: appliedPointsDiscount,
-        paymentMethod: safePaymentMethod,
-        paymentStatus: safePaymentStatus,
-        upiRefNote: safeUpiRefNote,
-        totalAmount: record.totalAmount,
-        isFlagged: record.isFlagged,
-        flagReason: record.flagReason,
-        referralCodeUsed: record.referralCodeUsed,
-        referralSpinsAwarded: record.referralSpinsAwarded,
-        orderStatus: 'pending' as const,
-        sourcePlatform: getActiveOrderPlatform(),
-        cloudDocId: deterministicDocId,
-        idempotencyKey: deterministicDocId,
-      };
-      if (isOnline) {
-        void saveCustomerOrderSummary(authUser, cloudPayload).catch((err) => {
-          console.warn('Cloud order queued for retry:', err);
-          setPendingSyncQueue((q) =>
-            enqueuePendingSyncItem(q, {
-              kind: 'order',
-              recordId: deterministicDocId,
-              payload: cloudPayload,
-              enqueuedAt: Date.now(),
-            })
-          );
-        });
-      } else {
-        setPendingSyncQueue((q) =>
-          enqueuePendingSyncItem(q, {
-            kind: 'order',
-            recordId: deterministicDocId,
-            payload: cloudPayload,
-            enqueuedAt: Date.now(),
-          })
-        );
-      }
-    }
   };
 
   const handleUpdateHomeOrderStatus = (id: string, nextStatus: OrderStatus) => {
@@ -2709,7 +2479,7 @@ export default function App() {
   }) => {
     const newRating: CafeRatingRecord = {
       id: `rat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      authorUid: authUser?.uid || adminCloudUser?.uid,
+      authorUid: adminCloudUser?.uid,
       authorName: payload.authorName,
       stars: payload.stars,
       comment: payload.comment,
@@ -2721,14 +2491,9 @@ export default function App() {
     };
     setRatings((prev) => [newRating, ...prev]);
 
-    const actor = authUser?.phoneNumber ? authUser : adminCloudUser;
-    if (actor) {
+    if (adminCloudUser) {
       if (isOnline) {
-        void saveCloudReview(
-          actor,
-          newRating,
-          !authUser?.phoneNumber && Boolean(adminCloudUser)
-        ).catch(() => {
+        void saveCloudReview(adminCloudUser, newRating, true).catch(() => {
           setPendingSyncQueue((q) =>
             enqueuePendingSyncItem(q, {
               kind: 'review',
@@ -2886,7 +2651,7 @@ export default function App() {
 
     const newRec: ReferralRecord = {
       id: `refman-${orderCode.replace(/[^a-zA-Z0-9_-]/g, '')}`,
-      customerUid: adminCloudUser?.uid || authUser?.uid,
+      customerUid: adminCloudUser?.uid,
       orderCode,
       orderMode: payload.orderMode,
       referralCode,
@@ -3079,7 +2844,7 @@ export default function App() {
   const handlePublishSnap = (snap: VibeSnapRecord) => {
     const cloudSnap: VibeSnapRecord = {
       ...snap,
-      authorUid: authUser?.uid || adminCloudUser?.uid,
+      authorUid: adminCloudUser?.uid,
       sourcePlatform: getActiveOrderPlatform(),
     };
     setVibeSnaps((prev) => [cloudSnap, ...prev].slice(0, 24));
@@ -3087,14 +2852,9 @@ export default function App() {
       awardLoyaltyPoints(5, 'Cafe Snap Shared on Vibe Wall', 'Snap Star 📸');
     }
 
-    const actor = authUser?.phoneNumber ? authUser : adminCloudUser;
-    if (actor) {
+    if (adminCloudUser) {
       if (isOnline) {
-        void saveCloudVibeSnap(
-          actor,
-          cloudSnap,
-          !authUser?.phoneNumber && Boolean(adminCloudUser)
-        ).catch(() => {
+        void saveCloudVibeSnap(adminCloudUser, cloudSnap, true).catch(() => {
           setPendingSyncQueue((q) =>
             enqueuePendingSyncItem(q, {
               kind: 'vibeSnap',
@@ -3220,19 +2980,6 @@ export default function App() {
             >
               Location
             </a>
-            <button
-              type="button"
-              onClick={() => setIsPhoneAuthOpen(true)}
-              className={`hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                authUser
-                  ? 'text-[#15803D] font-semibold'
-                  : 'hover:text-stone-900'
-              }`}
-            >
-              {authUser
-                ? formatPhoneDisplay(authUser.phoneNumber)
-                : 'OTP Login'}
-            </button>
             <button
               type="button"
               onClick={() => setIsAdminOpen(true)}
@@ -3394,27 +3141,6 @@ export default function App() {
                       {averageRatingDisplay} ({ratings.length} reviews)
                     </span>
                   </a>
-                  <button
-                    type="button"
-                    onClick={() => setIsPhoneAuthOpen(true)}
-                    className={`min-h-[40px] px-3.5 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors tabular-nums ${
-                      authUser
-                        ? 'bg-[#15803D]/10 hover:bg-[#15803D]/15 border-[#15803D]/30 text-[#15803D]'
-                        : 'bg-white hover:bg-stone-50 border-stone-200 text-stone-800'
-                    }`}
-                  >
-                    {authUser ? (
-                      <>
-                        <ShieldCheck className="w-3.5 h-3.5 text-[#15803D]" />
-                        <span>{formatPhoneDisplay(authUser.phoneNumber)}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Phone className="w-3.5 h-3.5 text-[#C83E2B]" />
-                        <span>Mobile OTP Login</span>
-                      </>
-                    )}
-                  </button>
                   <PWAInstallButton />
                 </div>
               </div>
@@ -4333,14 +4059,12 @@ export default function App() {
         savedGmails={savedGmailsList}
         loadedProfileGmail={loadedProfileGmail}
         lastOrderAt={lastOrderAt}
-        verifiedPhone={authUser?.phoneNumber || null}
         redeemPoints={homeRedeemPoints}
         onRedeemPointsChange={setHomeRedeemPoints}
         paymentMethod={homePaymentMethod}
         onPaymentMethodChange={setHomePaymentMethod}
         upiRefNote={homeUpiRefNote}
         onUpiRefNoteChange={setHomeUpiRefNote}
-        onOpenPhoneAuth={() => setIsPhoneAuthOpen(true)}
         onGmailChange={handleHomeGmailChange}
         onDetailsChange={setHomeDetails}
         onClearGpsPin={handleClearHomeGpsPin}
@@ -4427,29 +4151,6 @@ export default function App() {
         onClearAllSnaps={handleClearAllSnaps}
       />
 
-      {/* Customer Mobile OTP Authentication & Secure Profile Modal */}
-      <PhoneAuthModal
-        isOpen={isPhoneAuthOpen}
-        onClose={() => setIsPhoneAuthOpen(false)}
-        authUser={authUser}
-        profile={customerProfile}
-        orders={customerCloudOrders}
-        currentHomeDetails={homeDetails}
-        onProfileSaved={(saved) => {
-          setHomeDetails((prev) => ({
-            ...prev,
-            customerName: saved.customerName,
-            gmail: saved.gmail,
-            ward: saved.ward,
-            area: saved.area,
-            wardArea: saved.wardArea,
-            deliveryAddress: saved.deliveryAddress,
-            geoLocationUrl: sanitizeGpsLocationUrl(saved.geoLocationUrl),
-            customerNote: saved.customerNote,
-          }));
-        }}
-        onClearGpsPin={handleClearHomeGpsPin}
-      />
     </div>
   );
 }

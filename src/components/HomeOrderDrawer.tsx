@@ -17,8 +17,6 @@ import {
   Clock,
   AlertTriangle,
   Store,
-  Phone,
-  ShieldCheck,
   Gift,
   QrCode,
   Smartphone,
@@ -70,14 +68,12 @@ interface HomeOrderDrawerProps {
   loadedProfileGmail: string | null;
   lastOrderAt: number | null;
   loyalty?: LoyaltyState;
-  verifiedPhone?: string | null;
   redeemPoints: boolean;
   onRedeemPointsChange: (val: boolean) => void;
   paymentMethod: PaymentMethod;
   onPaymentMethodChange: (val: PaymentMethod) => void;
   upiRefNote: string;
   onUpiRefNoteChange: (val: string) => void;
-  onOpenPhoneAuth?: () => void;
   onGmailChange: (nextGmail: string) => void;
   onDetailsChange: (next: HomeOrderDetails) => void;
   onClearGpsPin?: () => void;
@@ -106,14 +102,12 @@ export function HomeOrderDrawer({
   loadedProfileGmail,
   lastOrderAt,
   loyalty,
-  verifiedPhone,
   redeemPoints,
   onRedeemPointsChange,
   paymentMethod,
   onPaymentMethodChange,
   upiRefNote,
   onUpiRefNoteChange,
-  onOpenPhoneAuth,
   onGmailChange,
   onDetailsChange,
   onClearGpsPin,
@@ -445,35 +439,6 @@ export function HomeOrderDrawer({
               )}
             </div>
 
-            {onOpenPhoneAuth && (
-              <div
-                className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 text-xs ${
-                  verifiedPhone
-                    ? 'bg-[#15803D]/10 border-[#15803D]/30 text-[#15803D]'
-                    : 'bg-stone-50 border-stone-200 text-stone-700'
-                }`}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  {verifiedPhone ? (
-                    <ShieldCheck className="w-4 h-4 shrink-0 text-[#15803D]" />
-                  ) : (
-                    <Phone className="w-4 h-4 shrink-0 text-[#C83E2B]" />
-                  )}
-                  <span className="font-semibold truncate tabular-nums">
-                    {verifiedPhone
-                      ? `OTP Verified: ${verifiedPhone}`
-                      : 'Mobile OTP Login (सुरक्षित प्रोफ़ाइल)'}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={onOpenPhoneAuth}
-                  className="px-2.5 py-1 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-[11px] font-bold text-stone-900 whitespace-nowrap shrink-0"
-                >
-                  {verifiedPhone ? 'Account / Logout' : 'Verify via OTP'}
-                </button>
-              </div>
-            )}
 
             {/* Gmail Field */}
             <div className="space-y-1.5">
