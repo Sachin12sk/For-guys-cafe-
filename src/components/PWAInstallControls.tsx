@@ -2,12 +2,13 @@ import { useState } from 'react';
 import { Download, Smartphone, WifiOff, X, Share } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { isCapacitorNative } from '../utils/nativeAndroid';
 
 export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showGuideModal, setShowGuideModal] = useState(false);
 
-  if (isInstalled) {
+  if (isInstalled || isCapacitorNative()) {
     return null;
   }
 
@@ -135,18 +136,32 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
   );
 }
 
-export function OfflineStatusBanner() {
+export function OfflineStatusBanner({
+  pendingSyncCount = 0,
+}: {
+  pendingSyncCount?: number;
+}) {
   const isOnline = useOnlineStatus();
 
-  if (isOnline) return null;
+  if (isOnline && pendingSyncCount <= 0) return null;
 
   return (
     <div
       role="status"
-      className="fixed bottom-4 left-4 z-40 flex items-center gap-2 rounded-xl bg-amber-600 px-3.5 py-2 text-xs font-semibold text-white shadow-lg"
+      className={`fixed bottom-4 left-4 z-40 flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold text-white shadow-lg ${
+        !isOnline ? 'bg-amber-600' : 'bg-[#15803D]'
+      }`}
     >
       <WifiOff className="w-3.5 h-3.5 shrink-0" />
-      <span>Offline Mode — Cached menu loaded</span>
+      <span>
+        {!isOnline
+          ? pendingSyncCount > 0
+            ? `इंटरनेट बंद है (Offline) — ${pendingSyncCount} अपडेट कतार में हैं (नेट आते ही Sync होंगे)`
+            : 'इंटरनेट बंद है (No Internet) — Cached मेन्यू उपलब्ध है। OTP और लाइव ऑर्डर के लिए इंटरनेट चालू करें।'
+          : `Syncing ${pendingSyncCount} pending update${
+              pendingSyncCount === 1 ? '' : 's'
+            }...`}
+      </span>
     </div>
   );
 }

@@ -18,7 +18,10 @@ import {
   ExternalLink,
   ArrowUpDown,
   Store,
+  Phone,
+  ShieldCheck,
 } from 'lucide-react';
+import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
   CART_STORAGE_KEY,
   COMBOS_CATEGORY_ID,
@@ -38,17 +41,25 @@ import {
   TABLE_ORDERS_STORAGE_KEY,
   VIBE_WALL_STORAGE_KEY,
 } from './data/defaultMenu';
-import { detectHighQuantityItems } from './utils/security';
+import {
+  detectHighQuantityItems,
+  validateIndianMobileNumber,
+} from './utils/security';
 import type {
   CafeRatingRecord,
   CafeStoreData,
   CartItem,
   ComboSet,
+  CustomerCloudOrder,
+  CustomerCloudProfile,
   HomeOrderDetails,
   HomeOrderRecord,
   LoyaltyState,
   OrderLineItem,
   OrderMode,
+  OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
   Product,
   ReferralRecord,
   SavedHomeCustomerProfile,
@@ -56,10 +67,70 @@ import type {
   TableOrderRecord,
   VibeSnapRecord,
 } from './types';
+import { adminAuth, auth, testConnection } from './firebase';
+import { useOnlineStatus } from './hooks/useOnlineStatus';
+import {
+  buildDeterministicOrderDocId,
+  clearCustomerGpsPin,
+  computeCartSubmissionFingerprint,
+  consumeAdminRedirectLogin,
+  createUniqueOrderCode,
+  deleteAdminCloudOrder,
+  extractLocal10FromE164,
+  formatPhoneDisplay,
+  loginAdminCloudWithGoogle,
+  logoutAdminCloud,
+  normalizeOrderStatus,
+  saveCustomerOrderSummary,
+  subscribeAdminCloudOrders,
+  subscribeCustomerOrders,
+  subscribeCustomerProfile,
+  toggleAdminCloudOrderFlag,
+  updateAdminCloudOrderStatus,
+  verifyAdminCloudAuthorization,
+  verifyAdminCloudOrderPayment,
+} from './services/customerAuth';
+import {
+  deleteCloudReferralRecord,
+  deleteCloudReview,
+  deleteCloudVibeSnap,
+  enqueuePendingSyncItem,
+  flushPendingSyncQueue,
+  loadPendingSyncQueue,
+  mergeCloudCatalogIntoLocal,
+  saveCloudReferralRecord,
+  saveCloudReview,
+  saveCloudStoreCatalog,
+  saveCloudVibeSnap,
+  subscribeAdminCloudReferrals,
+  subscribeCloudReviews,
+  subscribeCloudStoreCatalog,
+  subscribeCloudVibeSnaps,
+  updateCloudReferralRecord,
+  type PendingCloudSyncItem,
+} from './services/cloudSync';
+import {
+  measureLocalStorageUsage,
+  mergeRecordsByKey,
+  normalizeHomeMinOrder,
+  safeLocalStorageSet,
+  type FullCafeBackupPayload,
+} from './utils/storage';
+import {
+  applyLoyaltyOrderUpdate,
+  calculatePointsRedemption,
+} from './utils/loyalty';
+import { isValidUpiId } from './utils/upi';
+import {
+  exitNativeAndroidApp,
+  getActiveOrderPlatform,
+  subscribeNativeAndroidBackButton,
+  subscribeNativeAppLifecycle,
+} from './utils/nativeAndroid';
 import { CategoryStackCard } from './components/CategoryStackCard';
 import { ComboCard } from './components/ComboCard';
 import { ProductCard } from './components/ProductCard';
-import { BasketDrawer } from './components/BasketDrawer';
+import { BasketDrawer, type CheckoutSubmissionMeta } from './components/BasketDrawer';
 import { HomeOrderDrawer } from './components/HomeOrderDrawer';
 import { AdminModal } from './components/AdminModal';
 import { PopularPicksStrip } from './components/PopularPicksStrip';
@@ -67,6 +138,7 @@ import { ResilientImage } from './components/ResilientImage';
 import { PostOrderRatingModal } from './components/PostOrderRatingModal';
 import { SpinWinModal } from './components/SpinWinModal';
 import { SnapModal } from './components/SnapModal';
+import { PhoneAuthModal } from './components/PhoneAuthModal';
 import { RatingsAndVibeSection } from './components/RatingsAndVibeSection';
 import {
   PWAInstallButton,
@@ -77,6 +149,11 @@ import {
   formatWhatsappDisplay,
   sanitizeWhatsappNumber,
 } from './utils/whatsapp';
+import {
+  composeWardAreaLabel,
+  sanitizeGpsLocationUrl,
+  splitLegacyWardArea,
+} from './utils/location';
 
 type QuickFilterMode = 'all' | 'budget' | 'drinks-shakes';
 type RateFilterMode = 'all' | 'under-50' | '50-150' | 'above-150';
@@ -124,7 +201,7 @@ function loadStoredMenu(): CafeStoreData {
         ...parsed.settings,
       };
 
-      // Clean migration from earlier default credentials & WhatsApp number
+      // Clean migration from earlier placeholder defaults & WhatsApp number
       if (mergedSettings.whatsappNumber === '918381892161') {
         mergedSettings.whatsappNumber =
           DEFAULT_CAFE_DATA.settings.whatsappNumber;
@@ -133,12 +210,9 @@ function loadStoredMenu(): CafeStoreData {
         mergedSettings.adminId === 'admin' &&
         mergedSettings.adminPin === '1234'
       ) {
-        mergedSettings.adminId = DEFAULT_CAFE_DATA.settings.adminId;
-        mergedSettings.adminMobile = DEFAULT_CAFE_DATA.settings.adminMobile;
-        mergedSettings.adminPin = DEFAULT_CAFE_DATA.settings.adminPin;
-      }
-      if (!mergedSettings.adminMobile) {
-        mergedSettings.adminMobile = DEFAULT_CAFE_DATA.settings.adminMobile;
+        mergedSettings.adminId = '';
+        mergedSettings.adminMobile = '';
+        mergedSettings.adminPin = '';
       }
       if (
         !Array.isArray(mergedSettings.socialLinks) ||
@@ -346,12 +420,24 @@ function loadStoredHomeDetails(): HomeOrderDetails {
     const raw = localStorage.getItem(HOME_DETAILS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<HomeOrderDetails>;
+      const split = splitLegacyWardArea(
+        parsed.wardArea || '',
+        parsed.ward,
+        parsed.area
+      );
       return {
         gmail: parsed.gmail || '',
         customerName: parsed.customerName || '',
         alternatePhone: parsed.alternatePhone || '',
-        wardArea: parsed.wardArea || '',
-        geoLocationUrl: parsed.geoLocationUrl || '',
+        ward: split.ward,
+        area: split.area,
+        wardArea: composeWardAreaLabel({
+          ward: split.ward,
+          area: split.area,
+          wardArea: parsed.wardArea,
+        }),
+        deliveryAddress: parsed.deliveryAddress || '',
+        geoLocationUrl: sanitizeGpsLocationUrl(parsed.geoLocationUrl),
         customerNote: parsed.customerNote || '',
       };
     }
@@ -362,7 +448,10 @@ function loadStoredHomeDetails(): HomeOrderDetails {
     gmail: '',
     customerName: '',
     alternatePhone: '',
+    ward: '',
+    area: '',
     wardArea: '',
+    deliveryAddress: '',
     geoLocationUrl: '',
     customerNote: '',
   };
@@ -378,12 +467,26 @@ function loadStoredHomeProfiles(): Record<string, SavedHomeCustomerProfile> {
       for (const [k, v] of Object.entries(parsed)) {
         if (v && typeof v === 'object') {
           const prof = v as Partial<SavedHomeCustomerProfile>;
+          const rawWardArea = typeof prof.wardArea === 'string' ? prof.wardArea : '';
+          const split = splitLegacyWardArea(
+            rawWardArea,
+            typeof prof.ward === 'string' ? prof.ward : undefined,
+            typeof prof.area === 'string' ? prof.area : undefined
+          );
           sanitized[k] = {
             gmail: typeof prof.gmail === 'string' ? prof.gmail : k,
             customerName: typeof prof.customerName === 'string' ? prof.customerName : '',
             alternatePhone: typeof prof.alternatePhone === 'string' ? prof.alternatePhone : '',
-            wardArea: typeof prof.wardArea === 'string' ? prof.wardArea : '',
-            geoLocationUrl: typeof prof.geoLocationUrl === 'string' ? prof.geoLocationUrl : '',
+            ward: split.ward,
+            area: split.area,
+            wardArea: composeWardAreaLabel({
+              ward: split.ward,
+              area: split.area,
+              wardArea: rawWardArea,
+            }),
+            deliveryAddress:
+              typeof prof.deliveryAddress === 'string' ? prof.deliveryAddress : '',
+            geoLocationUrl: sanitizeGpsLocationUrl(prof.geoLocationUrl),
             customerNote: typeof prof.customerNote === 'string' ? prof.customerNote : '',
             lastItems: Array.isArray(prof.lastItems) ? prof.lastItems : [],
             lastOrderAt: typeof prof.lastOrderAt === 'string' ? prof.lastOrderAt : '',
@@ -493,94 +596,144 @@ export default function App() {
   const [rateSort, setRateSort] = useState<RateSortMode>('default');
   const [searchQuery, setSearchQuery] = useState('');
   const [tableNumber, setTableNumber] = useState<string>(getInitialTableFromUrl);
+  const [dineInPhone, setDineInPhone] = useState('');
   const [customerNote, setCustomerNote] = useState('');
+  const [dineInRedeemPoints, setDineInRedeemPoints] = useState(false);
+  const [homeRedeemPoints, setHomeRedeemPoints] = useState(false);
+  const [dineInPaymentMethod, setDineInPaymentMethod] =
+    useState<PaymentMethod>('cash');
+  const [homePaymentMethod, setHomePaymentMethod] =
+    useState<PaymentMethod>('cash');
+  const [dineInUpiRefNote, setDineInUpiRefNote] = useState('');
+  const [homeUpiRefNote, setHomeUpiRefNote] = useState('');
 
   const [isDineInDrawerOpen, setIsDineInDrawerOpen] = useState(false);
   const [isHomeDrawerOpen, setIsHomeDrawerOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [isSpinWinOpen, setIsSpinWinOpen] = useState(false);
   const [isSnapOpen, setIsSnapOpen] = useState(false);
+  const [isPhoneAuthOpen, setIsPhoneAuthOpen] = useState(false);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [customerProfile, setCustomerProfile] =
+    useState<CustomerCloudProfile | null>(null);
+  const [customerCloudOrders, setCustomerCloudOrders] = useState<
+    CustomerCloudOrder[]
+  >([]);
+  const [storageWarning, setStorageWarning] = useState<string | null>(null);
+  const [proactiveWarningDismissed, setProactiveWarningDismissed] =
+    useState(false);
+  const [adminCloudUser, setAdminCloudUser] = useState<User | null>(null);
+  const [adminCloudHomeOrders, setAdminCloudHomeOrders] = useState<
+    HomeOrderRecord[]
+  >([]);
+  const [adminCloudTableOrders, setAdminCloudTableOrders] = useState<
+    TableOrderRecord[]
+  >([]);
+  const [adminCloudError, setAdminCloudError] = useState<string | null>(null);
+  const [pendingSyncQueue, setPendingSyncQueue] = useState<
+    PendingCloudSyncItem[]
+  >(loadPendingSyncQueue);
   const [ratingPrompt, setRatingPrompt] = useState<{
     orderMode: OrderMode;
     orderCode: string;
     defaultName: string;
     earnedPoints: number;
   } | null>(null);
+  const [backExitNotice, setBackExitNotice] = useState(false);
 
+  const isOnline = useOnlineStatus();
   const catalogSectionRef = useRef<HTMLElement | null>(null);
   const combosSectionRef = useRef<HTMLElement | null>(null);
   const categoriesSectionRef = useRef<HTMLElement | null>(null);
   const ratingTimerRef = useRef<number | null>(null);
+  const cloudCatalogMissingRef = useRef(false);
+  const lastBackPressRef = useRef<number>(0);
+  const lastSubmitFingerprintRef = useRef<{
+    fingerprint: string;
+    timestamp: number;
+  } | null>(null);
 
-  // Persist menu data
+  // Persist menu data (never swallow quota errors)
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(cafeData));
-    } catch {
-      // Ignore quota errors
+    const res = safeLocalStorageSet(
+      STORAGE_KEY,
+      JSON.stringify(cafeData),
+      'Menu & Cafe Settings'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [cafeData]);
 
   // Persist Dine-In cart
   useEffect(() => {
-    try {
-      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(dineInCart));
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      CART_STORAGE_KEY,
+      JSON.stringify(dineInCart),
+      'Dine-In Cart'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [dineInCart]);
 
   // Persist Home Order cart
   useEffect(() => {
-    try {
-      localStorage.setItem(HOME_CART_STORAGE_KEY, JSON.stringify(homeCart));
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      HOME_CART_STORAGE_KEY,
+      JSON.stringify(homeCart),
+      'Home Order Cart'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [homeCart]);
 
   // Persist Home Order details
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        HOME_DETAILS_STORAGE_KEY,
-        JSON.stringify(homeDetails)
-      );
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      HOME_DETAILS_STORAGE_KEY,
+      JSON.stringify(homeDetails),
+      'Home Delivery Details'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [homeDetails]);
 
   // Persist Home Order logs
   useEffect(() => {
-    try {
-      localStorage.setItem(HOME_ORDERS_STORAGE_KEY, JSON.stringify(homeOrders));
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      HOME_ORDERS_STORAGE_KEY,
+      JSON.stringify(homeOrders),
+      'Home Order Logs'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [homeOrders]);
 
   // Persist Table Order logs
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        TABLE_ORDERS_STORAGE_KEY,
-        JSON.stringify(tableOrders)
-      );
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      TABLE_ORDERS_STORAGE_KEY,
+      JSON.stringify(tableOrders),
+      'Table Order Logs'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [tableOrders]);
 
   // Persist Gmail-keyed Home Customer Profiles
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        HOME_PROFILES_STORAGE_KEY,
-        JSON.stringify(savedHomeProfiles)
-      );
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      HOME_PROFILES_STORAGE_KEY,
+      JSON.stringify(savedHomeProfiles),
+      'Saved Customer Profiles'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [savedHomeProfiles]);
 
@@ -590,51 +743,91 @@ export default function App() {
       if (lastOrderAt === null) {
         localStorage.removeItem(LAST_ORDER_AT_STORAGE_KEY);
       } else {
-        localStorage.setItem(LAST_ORDER_AT_STORAGE_KEY, String(lastOrderAt));
+        const res = safeLocalStorageSet(
+          LAST_ORDER_AT_STORAGE_KEY,
+          String(lastOrderAt),
+          'Order Cooldown Timestamp'
+        );
+        if (!res.ok && res.errorMessage) {
+          setStorageWarning(res.errorMessage);
+        }
       }
     } catch {
-      // Ignore storage errors
+      // Ignore removeItem edge error if storage blocked
     }
   }, [lastOrderAt]);
 
   // Persist Customer Ratings
   useEffect(() => {
-    try {
-      localStorage.setItem(RATINGS_STORAGE_KEY, JSON.stringify(ratings));
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      RATINGS_STORAGE_KEY,
+      JSON.stringify(ratings),
+      'Customer Ratings'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [ratings]);
 
   // Persist Cafe Loyalty Points & Spin History
   useEffect(() => {
-    try {
-      localStorage.setItem(LOYALTY_STORAGE_KEY, JSON.stringify(loyalty));
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      LOYALTY_STORAGE_KEY,
+      JSON.stringify(loyalty),
+      'Loyalty Points & Spins'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [loyalty]);
 
   // Persist Order-Verified Referral Records
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        REFERRALS_STORAGE_KEY,
-        JSON.stringify(referralRecords)
-      );
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      REFERRALS_STORAGE_KEY,
+      JSON.stringify(referralRecords),
+      'Referral Ledger'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [referralRecords]);
 
   // Persist Vibe Wall Snaps
   useEffect(() => {
-    try {
-      localStorage.setItem(VIBE_WALL_STORAGE_KEY, JSON.stringify(vibeSnaps));
-    } catch {
-      // Ignore storage errors
+    const res = safeLocalStorageSet(
+      VIBE_WALL_STORAGE_KEY,
+      JSON.stringify(vibeSnaps),
+      'Vibe Wall Photos'
+    );
+    if (!res.ok && res.errorMessage) {
+      setStorageWarning(res.errorMessage);
     }
   }, [vibeSnaps]);
+
+  // Proactive browser localStorage usage monitor (>= 75% quota threshold)
+  useEffect(() => {
+    const report = measureLocalStorageUsage(0.75);
+    if (report.isNearLimit && report.warningMessage) {
+      setStorageWarning((prev) => {
+        if (prev && prev.includes('is full —')) return prev;
+        return proactiveWarningDismissed ? prev : report.warningMessage;
+      });
+    } else {
+      setStorageWarning((prev) =>
+        prev && prev.startsWith('Browser storage is ') ? null : prev
+      );
+      setProactiveWarningDismissed(false);
+    }
+  }, [
+    cafeData,
+    homeOrders,
+    tableOrders,
+    vibeSnaps,
+    ratings,
+    savedHomeProfiles,
+    proactiveWarningDismissed,
+  ]);
 
   // Cleanup pending post-order rating timer
   useEffect(() => {
@@ -644,6 +837,390 @@ export default function App() {
       }
     };
   }, []);
+
+  // Validate Firestore connectivity on startup & track Firebase Phone Auth session
+  useEffect(() => {
+    void testConnection();
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setAuthUser(user);
+      if (!user) {
+        setCustomerProfile(null);
+        setCustomerCloudOrders([]);
+        return;
+      }
+      const verified10 = extractLocal10FromE164(user.phoneNumber);
+      if (verified10) {
+        setHomeDetails((prev) =>
+          prev.alternatePhone === verified10
+            ? prev
+            : { ...prev, alternatePhone: verified10 }
+        );
+        setDineInPhone((prev) => (prev.trim() ? prev : verified10));
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Subscribe to authenticated customer's private profile & order history (only when signed in)
+  useEffect(() => {
+    if (!authUser || !authUser.phoneNumber) return;
+    const unsubProfile = subscribeCustomerProfile(
+      authUser.uid,
+      (profile) => {
+        setCustomerProfile(profile);
+        if (profile) {
+          const verified10 = extractLocal10FromE164(
+            profile.phoneNumber || authUser.phoneNumber
+          );
+          const profileSplit = splitLegacyWardArea(
+            profile.wardArea || '',
+            profile.ward,
+            profile.area
+          );
+          setHomeDetails((prev) => {
+            const nextWard = prev.ward?.trim() ? prev.ward : profileSplit.ward;
+            const nextArea = prev.area?.trim() ? prev.area : profileSplit.area;
+            const nextWardArea = prev.wardArea.trim()
+              ? prev.wardArea
+              : composeWardAreaLabel({
+                  ward: nextWard,
+                  area: nextArea,
+                  wardArea: profile.wardArea,
+                });
+            return {
+              gmail: prev.gmail.trim() ? prev.gmail : profile.gmail || '',
+              customerName: prev.customerName.trim()
+                ? prev.customerName
+                : profile.customerName || '',
+              alternatePhone: verified10 || prev.alternatePhone,
+              ward: nextWard,
+              area: nextArea,
+              wardArea: nextWardArea,
+              deliveryAddress: prev.deliveryAddress?.trim()
+                ? prev.deliveryAddress
+                : profile.deliveryAddress || '',
+              geoLocationUrl: sanitizeGpsLocationUrl(prev.geoLocationUrl)
+                ? sanitizeGpsLocationUrl(prev.geoLocationUrl)
+                : sanitizeGpsLocationUrl(profile.geoLocationUrl),
+              customerNote: prev.customerNote.trim()
+                ? prev.customerNote
+                : profile.customerNote || '',
+            };
+          });
+        }
+      },
+      (err) => {
+        console.warn('Customer profile subscription error:', err.message);
+      }
+    );
+
+    const unsubOrders = subscribeCustomerOrders(
+      authUser.uid,
+      (orders) => {
+        setCustomerCloudOrders(orders);
+      },
+      (err) => {
+        console.warn('Customer orders subscription error:', err.message);
+      }
+    );
+
+    return () => {
+      unsubProfile();
+      unsubOrders();
+    };
+  }, [authUser]);
+
+  // Track isolated Admin Cloud Auth session & verify Firebase Custom Claims / Admin Role
+  useEffect(() => {
+    void consumeAdminRedirectLogin();
+    const unsubAdminAuth = onAuthStateChanged(adminAuth, (user) => {
+      if (!user) {
+        setAdminCloudUser(null);
+        setAdminCloudHomeOrders([]);
+        setAdminCloudTableOrders([]);
+        setAdminCloudError(null);
+        return;
+      }
+      void verifyAdminCloudAuthorization(user)
+        .then((res) => {
+          if (res.authorized) {
+            setAdminCloudUser(user);
+            setAdminCloudError(null);
+          } else {
+            setAdminCloudUser(null);
+            setAdminCloudHomeOrders([]);
+            setAdminCloudTableOrders([]);
+            setAdminCloudError(
+              `अधिकृत Admin खाता आवश्यक है (${user.email || 'unknown'} को Firebase Admin Custom Claim / Role की अनुमति नहीं है)।`
+            );
+            void signOut(adminAuth).catch(() => {});
+          }
+        })
+        .catch(() => {
+          setAdminCloudUser(null);
+        });
+    });
+    return () => unsubAdminAuth();
+  }, []);
+
+  // Native Android Back Button & App Lifecycle (Resume / QR Deep Links)
+  const nativeBackHandlerRef = useRef<() => void>(() => {});
+  nativeBackHandlerRef.current = () => {
+    if (ratingPrompt) {
+      setRatingPrompt(null);
+      return;
+    }
+    if (isPhoneAuthOpen) {
+      setIsPhoneAuthOpen(false);
+      return;
+    }
+    if (isAdminOpen) {
+      setIsAdminOpen(false);
+      return;
+    }
+    if (isSnapOpen) {
+      setIsSnapOpen(false);
+      return;
+    }
+    if (isSpinWinOpen) {
+      setIsSpinWinOpen(false);
+      return;
+    }
+    if (isHomeDrawerOpen) {
+      setIsHomeDrawerOpen(false);
+      return;
+    }
+    if (isDineInDrawerOpen) {
+      setIsDineInDrawerOpen(false);
+      return;
+    }
+    if (
+      searchQuery.trim() ||
+      selectedCategoryId !== 'all' ||
+      quickFilter !== 'all' ||
+      rateFilter !== 'all' ||
+      rateSort !== 'default'
+    ) {
+      setSearchQuery('');
+      setSelectedCategoryId('all');
+      setQuickFilter('all');
+      setRateFilter('all');
+      setRateSort('default');
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastBackPressRef.current < 2200) {
+      void exitNativeAndroidApp();
+      return;
+    }
+    lastBackPressRef.current = now;
+    setBackExitNotice(true);
+    window.setTimeout(() => {
+      setBackExitNotice(false);
+    }, 2200);
+  };
+
+  useEffect(() => {
+    let cleanupBack = () => {};
+    let cleanupLifecycle = () => {};
+
+    void subscribeNativeAndroidBackButton(() => {
+      nativeBackHandlerRef.current();
+    }).then((unsub) => {
+      cleanupBack = unsub;
+    });
+
+    void subscribeNativeAppLifecycle({
+      onResume: () => {
+        void testConnection();
+        if (pendingSyncQueue.length > 0 && isOnline) {
+          void flushPendingSyncQueue({
+            queue: pendingSyncQueue,
+            authUser,
+            adminUser: adminCloudUser,
+            isOnline: true,
+          }).then(({ remaining, flushedCount }) => {
+            if (flushedCount > 0) {
+              setPendingSyncQueue(remaining);
+            }
+          });
+        }
+      },
+      onAppUrlOpen: (incomingUrl: string) => {
+        try {
+          const parsed = new URL(incomingUrl);
+          const modeParam = parsed.searchParams.get('mode')?.toLowerCase();
+          if (modeParam === 'home') {
+            setOrderMode('home');
+          } else if (modeParam === 'dine-in') {
+            setOrderMode('dine-in');
+          }
+          const tableParam = parsed.searchParams.get('table');
+          if (tableParam && tableParam.trim()) {
+            const cleanTable = /^\d+$/.test(tableParam.trim())
+              ? `Table ${tableParam.trim()}`
+              : tableParam.trim();
+            setTableNumber(cleanTable);
+            setOrderMode('dine-in');
+          }
+          const refParam = parsed.searchParams.get('ref');
+          if (refParam && refParam.trim().length >= 4) {
+            const cleanRef = refParam.trim().toUpperCase();
+            setLoyalty((prev) => ({
+              ...prev,
+              pendingRefCode:
+                cleanRef !== prev.referralCode.toUpperCase() &&
+                !prev.referredByClaimed
+                  ? cleanRef
+                  : prev.pendingRefCode,
+            }));
+          }
+        } catch {
+          // Ignore malformed deep link URL
+        }
+      },
+    }).then((unsub) => {
+      cleanupLifecycle = unsub;
+    });
+
+    return () => {
+      cleanupBack();
+      cleanupLifecycle();
+    };
+  }, [authUser, adminCloudUser, isOnline, pendingSyncQueue]);
+
+  useEffect(() => {
+    if (!adminCloudUser) return;
+    setAdminCloudError(null);
+    const unsubOrders = subscribeAdminCloudOrders(
+      ({ homeOrders: cloudHome, tableOrders: cloudTable }) => {
+        setAdminCloudHomeOrders(cloudHome);
+        setAdminCloudTableOrders(cloudTable);
+        setAdminCloudError(null);
+      },
+      (errMessage) => {
+        setAdminCloudError(errMessage);
+      }
+    );
+    const unsubReferrals = subscribeAdminCloudReferrals(
+      (cloudRefs) => {
+        setReferralRecords((prev) =>
+          mergeRecordsByKey(
+            cloudRefs,
+            prev,
+            (r) => r.orderCode || r.id
+          ).sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+        );
+      },
+      (err) => {
+        console.warn('Cloud referrals sync notice:', err.message);
+      }
+    );
+    return () => {
+      unsubOrders();
+      unsubReferrals();
+    };
+  }, [adminCloudUser]);
+
+  // Public live sync for Menu, Products, Prices, Categories, Combos & Cafe Open/Closed status
+  useEffect(() => {
+    const unsubCatalog = subscribeCloudStoreCatalog(
+      (remoteCatalog) => {
+        cloudCatalogMissingRef.current = false;
+        setCafeData((prev) => mergeCloudCatalogIntoLocal(prev, remoteCatalog));
+      },
+      () => {
+        cloudCatalogMissingRef.current = true;
+      },
+      (err) => {
+        console.warn('Live catalog subscription notice:', err.message);
+      }
+    );
+    const unsubReviews = subscribeCloudReviews(
+      (remoteReviews) => {
+        setRatings((prev) =>
+          mergeRecordsByKey(remoteReviews, prev, (r) => r.id).sort((a, b) =>
+            b.createdAt.localeCompare(a.createdAt)
+          )
+        );
+      },
+      (err) => {
+        console.warn('Live reviews subscription notice:', err.message);
+      }
+    );
+    const unsubSnaps = subscribeCloudVibeSnaps(
+      (remoteSnaps) => {
+        setVibeSnaps((prev) =>
+          mergeRecordsByKey(remoteSnaps, prev, (s) => s.id)
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+            .slice(0, 24)
+        );
+      },
+      (err) => {
+        console.warn('Live vibe snaps subscription notice:', err.message);
+      }
+    );
+    return () => {
+      unsubCatalog();
+      unsubReviews();
+      unsubSnaps();
+    };
+  }, []);
+
+  // Seed /store/catalog once if Admin connects and cloud catalog document does not exist yet
+  useEffect(() => {
+    if (!adminCloudUser || !cloudCatalogMissingRef.current) return;
+    cloudCatalogMissingRef.current = false;
+    void saveCloudStoreCatalog(cafeData, adminCloudUser.email || '').catch(
+      (err) => console.warn('Initial cloud catalog seed skipped:', err)
+    );
+  }, [adminCloudUser]);
+
+  // Offline -> Online automatic pending sync flush
+  useEffect(() => {
+    if (!isOnline || pendingSyncQueue.length === 0) return;
+    let cancelled = false;
+    void flushPendingSyncQueue({
+      queue: pendingSyncQueue,
+      authUser,
+      adminUser: adminCloudUser,
+      isOnline,
+    }).then(({ remaining, flushedCount }) => {
+      if (!cancelled && flushedCount > 0) {
+        setPendingSyncQueue(remaining);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOnline, authUser, adminCloudUser, pendingSyncQueue]);
+
+  const mergedAdminHomeOrders = useMemo(
+    () =>
+      mergeRecordsByKey(
+        adminCloudHomeOrders,
+        homeOrders,
+        (o) =>
+          o.cloudDocId ||
+          o.idempotencyKey ||
+          `${o.orderCode}-${(o.alternatePhone || o.customerName || '').trim()}-${o.timestamp.slice(0, 10)}`
+      ).sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+    [adminCloudHomeOrders, homeOrders]
+  );
+
+  const mergedAdminTableOrders = useMemo(
+    () =>
+      mergeRecordsByKey(
+        adminCloudTableOrders,
+        tableOrders,
+        (o) =>
+          o.cloudDocId ||
+          o.idempotencyKey ||
+          `${o.orderCode}-${(o.customerPhone || o.tableNumber || '').trim()}-${o.timestamp.slice(0, 10)}`
+      ).sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+    [adminCloudTableOrders, tableOrders]
+  );
 
   const savedGmailsList = useMemo(
     () =>
@@ -735,7 +1312,7 @@ export default function App() {
     [activeCart, orderMode]
   );
 
-  const homeMinOrder = Math.max(0, Number(cafeData.settings.homeMinOrder) || 150);
+  const homeMinOrder = normalizeHomeMinOrder(cafeData.settings.homeMinOrder);
   const homeDeliveryFee = Math.max(
     0,
     Number(cafeData.settings.homeDeliveryFee ?? 0)
@@ -1103,12 +1680,24 @@ export default function App() {
     const matched = norm ? savedHomeProfiles[norm] : undefined;
 
     if (matched) {
+      const splitMatched = splitLegacyWardArea(
+        matched.wardArea || '',
+        matched.ward,
+        matched.area
+      );
       setHomeDetails({
         gmail: nextGmail,
         customerName: matched.customerName || '',
         alternatePhone: matched.alternatePhone || '',
-        wardArea: matched.wardArea || '',
-        geoLocationUrl: matched.geoLocationUrl || '',
+        ward: splitMatched.ward,
+        area: splitMatched.area,
+        wardArea: composeWardAreaLabel({
+          ward: splitMatched.ward,
+          area: splitMatched.area,
+          wardArea: matched.wardArea,
+        }),
+        deliveryAddress: matched.deliveryAddress || '',
+        geoLocationUrl: sanitizeGpsLocationUrl(matched.geoLocationUrl),
         customerNote: matched.customerNote || '',
       });
 
@@ -1143,7 +1732,10 @@ export default function App() {
         gmail: nextGmail,
         customerName: '',
         alternatePhone: '',
+        ward: '',
+        area: '',
         wardArea: '',
+        deliveryAddress: '',
         geoLocationUrl: '',
         customerNote: '',
       });
@@ -1180,11 +1772,44 @@ export default function App() {
     setHomeCart([]);
   };
 
+  const handleClearHomeGpsPin = () => {
+    setHomeDetails((prev) => ({
+      ...prev,
+      geoLocationUrl: '',
+    }));
+
+    const normGmail = normalizeGmail(homeDetails.gmail);
+    if (normGmail) {
+      setSavedHomeProfiles((prev) => {
+        const existingProfile = prev[normGmail];
+        if (!existingProfile || !existingProfile.geoLocationUrl) return prev;
+        return {
+          ...prev,
+          [normGmail]: {
+            ...existingProfile,
+            geoLocationUrl: '',
+          },
+        };
+      });
+    }
+
+    if (authUser && authUser.phoneNumber) {
+      setCustomerProfile((prev) =>
+        prev ? { ...prev, geoLocationUrl: '' } : prev
+      );
+      void clearCustomerGpsPin(authUser, homeDetails).catch((err) => {
+        console.warn('Firestore GPS pin clear skipped:', err);
+      });
+    }
+  };
+
   const recordOrderLoyalty = (params: {
     orderCode: string;
     orderMode: OrderMode;
     purchaseAmount: number;
     pointsToAdd: number;
+    pointsToDeduct?: number;
+    discountApplied?: number;
     orderLabel: string;
     customerLabel: string;
     verifiedReferralCode?: string;
@@ -1201,105 +1826,78 @@ export default function App() {
       1,
       Number(cafeData.settings.repeatOrderSpins ?? 1)
     );
+    const defaultReferralSpins = Math.max(
+      1,
+      Number(cafeData.settings.referralSpins ?? 5)
+    );
 
-    setLoyalty((prev) => {
-      const creditedOrderIds = prev.creditedOrderIds || [];
-      // Duplicate-order protection so the same order is never double-counted
-      if (creditedOrderIds.includes(params.orderCode)) {
-        return prev;
-      }
-
-      const isFirst = prev.ordersCompleted === 0;
-      const baseOrderSpins = isFirst ? firstOrderSpins : repeatOrderSpins;
-
-      const candidateRef = (
-        params.verifiedReferralCode ||
-        prev.pendingRefCode ||
-        ''
-      )
-        .trim()
-        .toUpperCase();
-      const canVerifyRef =
-        Boolean(candidateRef) &&
-        candidateRef.length >= 4 &&
-        candidateRef !== prev.referralCode.toUpperCase() &&
-        !prev.referredByClaimed &&
-        !(prev.claimedReferralCodes || []).includes(candidateRef);
-
-      const refBonusSpins = canVerifyRef
-        ? Math.max(
-            1,
-            Number(
-              params.verifiedReferralSpins ??
-                cafeData.settings.referralSpins ??
-                5
-            )
-          )
-        : 0;
-
-      const totalSpinsAdded = baseOrderSpins + refBonusSpins;
-      const historyLabel = canVerifyRef
-        ? `${params.orderLabel} · +${baseOrderSpins} Order ${
-            baseOrderSpins === 1 ? 'Spin' : 'Spins'
-          } & +${refBonusSpins} Referral Spins (${candidateRef})`
-        : `${params.orderLabel} · +${baseOrderSpins} ${
-            baseOrderSpins === 1 ? 'Spin' : 'Spins'
-          }`;
-
-      return {
-        ...prev,
-        points: Math.max(0, prev.points + safeDelta),
-        totalEarned: Math.max(0, prev.totalEarned + safeDelta),
-        ordersCompleted: prev.ordersCompleted + 1,
-        totalPurchaseAmount: prev.totalPurchaseAmount + safeSpend,
-        spinsLeft: prev.spinsLeft + totalSpinsAdded,
-        creditedOrderIds: [...creditedOrderIds, params.orderCode],
-        pendingRefCode: canVerifyRef ? null : prev.pendingRefCode,
-        referredByClaimed: canVerifyRef ? true : prev.referredByClaimed,
-        claimedReferralCodes: canVerifyRef
-          ? [...(prev.claimedReferralCodes || []), candidateRef]
-          : prev.claimedReferralCodes,
-        referralCount: canVerifyRef
-          ? prev.referralCount + 1
-          : prev.referralCount,
-        referralEarningsSpins: canVerifyRef
-          ? (prev.referralEarningsSpins || 0) + refBonusSpins
-          : prev.referralEarningsSpins || 0,
-        referralOrderAmount: canVerifyRef
-          ? (prev.referralOrderAmount || 0) + safeSpend
-          : prev.referralOrderAmount || 0,
-        history: [
-          {
-            id: `ord-pts-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            label: historyLabel,
-            delta: safeDelta,
-            timestamp: new Date().toISOString(),
-          },
-          ...prev.history,
-        ].slice(0, 30),
-      };
-    });
+    setLoyalty((prev) =>
+      applyLoyaltyOrderUpdate(prev, {
+        orderCode: params.orderCode,
+        purchaseAmount: safeSpend,
+        pointsToAdd: safeDelta,
+        pointsToDeduct: params.pointsToDeduct,
+        discountApplied: params.discountApplied,
+        orderLabel: params.orderLabel,
+        firstOrderSpins,
+        repeatOrderSpins,
+        defaultReferralSpins,
+        verifiedReferralCode: params.verifiedReferralCode,
+        verifiedReferralSpins: params.verifiedReferralSpins,
+      })
+    );
 
     if (params.verifiedReferralCode && params.verifiedReferralSpins) {
       const refCodeUpper = params.verifiedReferralCode.trim().toUpperCase();
+      const newRec: ReferralRecord = {
+        id: `reford-${params.orderCode.replace(/[^a-zA-Z0-9_-]/g, '')}`,
+        customerUid: authUser?.uid || adminCloudUser?.uid,
+        orderCode: params.orderCode,
+        orderMode: params.orderMode,
+        referralCode: refCodeUpper,
+        customerLabel: params.customerLabel,
+        orderAmount: safeSpend,
+        spinsAwarded: params.verifiedReferralSpins || 5,
+        status: 'credited',
+        note: 'Auto-verified on WhatsApp order placement',
+        timestamp: new Date().toISOString(),
+        sourcePlatform: getActiveOrderPlatform(),
+      };
       setReferralRecords((prevRefs) => {
         if (prevRefs.some((r) => r.orderCode === params.orderCode)) {
           return prevRefs;
         }
-        const newRec: ReferralRecord = {
-          id: `reford-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          orderCode: params.orderCode,
-          orderMode: params.orderMode,
-          referralCode: refCodeUpper,
-          customerLabel: params.customerLabel,
-          orderAmount: safeSpend,
-          spinsAwarded: params.verifiedReferralSpins || 5,
-          status: 'credited',
-          note: 'Auto-verified on WhatsApp order placement',
-          timestamp: new Date().toISOString(),
-        };
         return [newRec, ...prevRefs];
       });
+
+      const actor = authUser?.phoneNumber ? authUser : adminCloudUser;
+      if (actor) {
+        if (isOnline) {
+          void saveCloudReferralRecord(
+            actor,
+            newRec,
+            !authUser?.phoneNumber && Boolean(adminCloudUser)
+          ).catch(() => {
+            setPendingSyncQueue((q) =>
+              enqueuePendingSyncItem(q, {
+                kind: 'referral',
+                recordId: newRec.id,
+                payload: newRec,
+                enqueuedAt: Date.now(),
+              })
+            );
+          });
+        } else {
+          setPendingSyncQueue((q) =>
+            enqueuePendingSyncItem(q, {
+              kind: 'referral',
+              recordId: newRec.id,
+              payload: newRec,
+              enqueuedAt: Date.now(),
+            })
+          );
+        }
+      }
     }
   };
 
@@ -1345,24 +1943,8 @@ export default function App() {
     }, 850);
   };
 
-  const getNextOrderCode = (
-    prefix: 'TBL' | 'HOM',
-    existingCodes: string[],
-    creditedIds: string[]
-  ): string => {
-    const used = new Set([
-      ...existingCodes.map((c) => c.toUpperCase()),
-      ...creditedIds.map((c) => c.toUpperCase()),
-    ]);
-    let num = 1001 + existingCodes.length;
-    while (used.has(`${prefix}-${num}`)) {
-      num += 1;
-    }
-    return `${prefix}-${num}`;
-  };
-
-  // Order Analytics & Excel Sheet Recording Handlers
-  const handleRecordTableOrder = () => {
+  // Order Analytics & Excel Sheet Recording Handlers (Duplicate-protected & Idempotent Cloud Sync)
+  const handleRecordTableOrder = (meta: CheckoutSubmissionMeta) => {
     const newItems = dineInCart.filter((i) => !i.isSent);
     if (newItems.length === 0) return;
 
@@ -1380,11 +1962,43 @@ export default function App() {
         : undefined,
     }));
 
-    const newOrderAmount = lineItems.reduce((sum, li) => sum + li.subtotal, 0);
-    const sessionTotalAmount = dineInCart.reduce(
+    const grossNewOrderAmount = lineItems.reduce((sum, li) => sum + li.subtotal, 0);
+    const grossSessionAmount = dineInCart.reduce(
       (sum, item) => sum + item.product.price * item.quantity,
       0
     );
+    const redemptionCheck = calculatePointsRedemption({
+      availablePoints: loyalty.points,
+      subtotal: grossNewOrderAmount,
+      settings: cafeData.settings,
+      redeemRequested: Boolean(meta.pointsRedeemed > 0 && meta.pointsDiscount > 0),
+    });
+    const appliedPointsRedeemed = redemptionCheck.canApply
+      ? redemptionCheck.pointsToDeduct
+      : 0;
+    const appliedPointsDiscount = redemptionCheck.canApply
+      ? redemptionCheck.discountAmount
+      : 0;
+
+    const netNewOrderAmount = Math.max(0, grossNewOrderAmount - appliedPointsDiscount);
+    const sessionTotalAmount = Math.max(0, grossSessionAmount - appliedPointsDiscount);
+
+    const fingerprint = computeCartSubmissionFingerprint({
+      orderMode: 'dine-in',
+      items: lineItems,
+      totalAmount: netNewOrderAmount,
+      identityKey: tableNumber.trim() || authUser?.uid || 'table',
+    });
+    const now = Date.now();
+    if (
+      lastSubmitFingerprintRef.current &&
+      lastSubmitFingerprintRef.current.fingerprint === fingerprint &&
+      now - lastSubmitFingerprintRef.current.timestamp < 4000
+    ) {
+      return;
+    }
+    lastSubmitFingerprintRef.current = { fingerprint, timestamp: now };
+
     const previouslySentCount = dineInCart
       .filter((i) => i.isSent)
       .reduce((sum, i) => sum + i.quantity, 0);
@@ -1395,11 +2009,19 @@ export default function App() {
     );
     const highQty = detectHighQuantityItems(newItems, threshold);
 
-    const orderCode = getNextOrderCode(
+    const orderCode = createUniqueOrderCode(
       'TBL',
-      tableOrders.map((o) => o.orderCode),
+      [
+        ...tableOrders.map((o) => o.orderCode),
+        ...adminCloudTableOrders.map((o) => o.orderCode),
+      ],
       loyalty.creditedOrderIds || []
     );
+    const deterministicDocId = buildDeterministicOrderDocId(
+      orderCode,
+      authUser?.uid || 'local'
+    );
+
     const refSpinsSetting = Math.max(
       1,
       Number(cafeData.settings.referralSpins ?? 5)
@@ -1416,38 +2038,72 @@ export default function App() {
         ? pendingRef
         : undefined;
 
+    const safePaymentMethod: PaymentMethod =
+      meta.paymentMethod === 'upi' && isValidUpiId(cafeData.settings.upiId)
+        ? 'upi'
+        : 'cash';
+    // Strict anti-fake rule: Customer checkout can NEVER set paymentStatus = 'paid'
+    const safePaymentStatus: PaymentStatus =
+      safePaymentMethod === 'upi' ? 'pending_verification' : 'unpaid';
+    const safeUpiRefNote =
+      safePaymentMethod === 'upi' ? (meta.upiRefNote || '').trim().slice(0, 64) : '';
+
+    const rawPhoneInput = dineInPhone.trim();
+    const phoneValidation = rawPhoneInput
+      ? validateIndianMobileNumber(rawPhoneInput)
+      : { valid: false, normalized: '' };
+    const resolvedDineInPhone = phoneValidation.valid
+      ? phoneValidation.normalized
+      : rawPhoneInput || extractLocal10FromE164(authUser?.phoneNumber) || undefined;
+
     const record: TableOrderRecord = {
-      id: `tbl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `tbl-${deterministicDocId}`,
       orderCode,
       timestamp: new Date().toISOString(),
       tableNumber: tableNumber.trim() || 'Counter / Walk-in',
+      customerPhone: resolvedDineInPhone,
       customerNote: customerNote.trim(),
       items: lineItems,
-      newOrderAmount,
+      newOrderAmount: netNewOrderAmount,
       sessionTotalAmount,
       previouslySentCount,
+      pointsRedeemed: appliedPointsRedeemed > 0 ? appliedPointsRedeemed : undefined,
+      pointsDiscount: appliedPointsDiscount > 0 ? appliedPointsDiscount : undefined,
+      paymentMethod: safePaymentMethod,
+      paymentStatus: safePaymentStatus,
+      upiRefNote: safeUpiRefNote || undefined,
       isFlagged: highQty.isFlagged,
       flagReason: highQty.isFlagged ? highQty.reason : undefined,
       referralCodeUsed: activePendingRef,
       referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
+      orderStatus: 'pending',
+      sourcePlatform: getActiveOrderPlatform(),
+      cloudDocId: authUser?.phoneNumber ? deterministicDocId : undefined,
+      idempotencyKey: deterministicDocId,
     };
 
     setTableOrders((prev) => [record, ...prev]);
 
     const earnedPoints =
       cafeData.settings.loyaltyEnabled !== false
-        ? computeOrderPointsEstimate(newOrderAmount, cafeData.settings)
+        ? computeOrderPointsEstimate(netNewOrderAmount, cafeData.settings)
         : 0;
     recordOrderLoyalty({
       orderCode: record.orderCode,
       orderMode: 'dine-in',
-      purchaseAmount: newOrderAmount,
+      purchaseAmount: netNewOrderAmount,
       pointsToAdd: earnedPoints,
-      orderLabel: `Dine-In Order ${record.orderCode} (₹${newOrderAmount})`,
+      pointsToDeduct: appliedPointsRedeemed,
+      discountApplied: appliedPointsDiscount,
+      orderLabel: `Dine-In Order ${record.orderCode} (₹${netNewOrderAmount})`,
       customerLabel: record.tableNumber,
       verifiedReferralCode: activePendingRef,
       verifiedReferralSpins: activePendingRef ? refSpinsSetting : undefined,
     });
+
+    // Reset redemption toggle & UTR note immediately after recording to prevent double reuse
+    setDineInRedeemPoints(false);
+    setDineInUpiRefNote('');
 
     scheduleRatingPopup({
       orderMode: 'dine-in',
@@ -1455,9 +2111,58 @@ export default function App() {
       defaultName: tableNumber.trim() ? `Guest (${tableNumber.trim()})` : '',
       earnedPoints,
     });
+
+    if (authUser && authUser.phoneNumber) {
+      const cloudPayload = {
+        orderCode: record.orderCode,
+        orderMode: 'dine-in' as const,
+        items: lineItems,
+        alternatePhone: resolvedDineInPhone,
+        tableNumber: record.tableNumber,
+        customerNote: record.customerNote,
+        pointsRedeemed: appliedPointsRedeemed,
+        pointsDiscount: appliedPointsDiscount,
+        paymentMethod: safePaymentMethod,
+        paymentStatus: safePaymentStatus,
+        upiRefNote: safeUpiRefNote,
+        totalAmount: record.newOrderAmount,
+        sessionTotalAmount: record.sessionTotalAmount,
+        previouslySentCount: record.previouslySentCount,
+        isFlagged: record.isFlagged,
+        flagReason: record.flagReason,
+        referralCodeUsed: record.referralCodeUsed,
+        referralSpinsAwarded: record.referralSpinsAwarded,
+        orderStatus: 'pending' as const,
+        sourcePlatform: getActiveOrderPlatform(),
+        cloudDocId: deterministicDocId,
+        idempotencyKey: deterministicDocId,
+      };
+      if (isOnline) {
+        void saveCustomerOrderSummary(authUser, cloudPayload).catch((err) => {
+          console.warn('Cloud order queued for retry:', err);
+          setPendingSyncQueue((q) =>
+            enqueuePendingSyncItem(q, {
+              kind: 'order',
+              recordId: deterministicDocId,
+              payload: cloudPayload,
+              enqueuedAt: Date.now(),
+            })
+          );
+        });
+      } else {
+        setPendingSyncQueue((q) =>
+          enqueuePendingSyncItem(q, {
+            kind: 'order',
+            recordId: deterministicDocId,
+            payload: cloudPayload,
+            enqueuedAt: Date.now(),
+          })
+        );
+      }
+    }
   };
 
-  const handleRecordHomeOrder = () => {
+  const handleRecordHomeOrder = (meta: CheckoutSubmissionMeta) => {
     const selectedItems = homeCart.filter((i) => i.selected !== false);
     if (selectedItems.length === 0) return;
 
@@ -1476,12 +2181,47 @@ export default function App() {
     }));
 
     const itemsSubtotal = lineItems.reduce((sum, li) => sum + li.subtotal, 0);
+    const redemptionCheck = calculatePointsRedemption({
+      availablePoints: loyalty.points,
+      subtotal: itemsSubtotal,
+      settings: cafeData.settings,
+      redeemRequested: Boolean(meta.pointsRedeemed > 0 && meta.pointsDiscount > 0),
+    });
+    const appliedPointsRedeemed = redemptionCheck.canApply
+      ? redemptionCheck.pointsToDeduct
+      : 0;
+    const appliedPointsDiscount = redemptionCheck.canApply
+      ? redemptionCheck.discountAmount
+      : 0;
+
     const deliveryFee = Math.max(
       0,
       Number(cafeData.settings.homeDeliveryFee ?? 0)
     );
-    const totalAmount = itemsSubtotal + deliveryFee;
+    const discountedSubtotal = Math.max(0, itemsSubtotal - appliedPointsDiscount);
+    const totalAmount = discountedSubtotal + deliveryFee;
     const normGmail = normalizeGmail(homeDetails.gmail);
+
+    const fingerprint = computeCartSubmissionFingerprint({
+      orderMode: 'home',
+      items: lineItems,
+      totalAmount,
+      identityKey:
+        authUser?.uid ||
+        homeDetails.alternatePhone ||
+        normGmail ||
+        homeDetails.customerName ||
+        'home',
+    });
+    const now = Date.now();
+    if (
+      lastSubmitFingerprintRef.current &&
+      lastSubmitFingerprintRef.current.fingerprint === fingerprint &&
+      now - lastSubmitFingerprintRef.current.timestamp < 4000
+    ) {
+      return;
+    }
+    lastSubmitFingerprintRef.current = { fingerprint, timestamp: now };
 
     const threshold = Math.max(
       1,
@@ -1489,11 +2229,19 @@ export default function App() {
     );
     const highQty = detectHighQuantityItems(selectedItems, threshold);
 
-    const orderCode = getNextOrderCode(
+    const orderCode = createUniqueOrderCode(
       'HOM',
-      homeOrders.map((o) => o.orderCode),
+      [
+        ...homeOrders.map((o) => o.orderCode),
+        ...adminCloudHomeOrders.map((o) => o.orderCode),
+      ],
       loyalty.creditedOrderIds || []
     );
+    const deterministicDocId = buildDeterministicOrderDocId(
+      orderCode,
+      authUser?.uid || 'local'
+    );
+
     const refSpinsSetting = Math.max(
       1,
       Number(cafeData.settings.referralSpins ?? 5)
@@ -1510,23 +2258,59 @@ export default function App() {
         ? pendingRef
         : undefined;
 
+    const splitOrderLoc = splitLegacyWardArea(
+      homeDetails.wardArea,
+      homeDetails.ward,
+      homeDetails.area
+    );
+    const cleanWard = splitOrderLoc.ward.trim();
+    const cleanArea = splitOrderLoc.area.trim();
+    const cleanWardArea = composeWardAreaLabel({
+      ward: cleanWard,
+      area: cleanArea,
+      wardArea: homeDetails.wardArea,
+    });
+    const cleanDeliveryAddress = (homeDetails.deliveryAddress || '').trim();
+    const safeGeoUrl = sanitizeGpsLocationUrl(homeDetails.geoLocationUrl);
+
+    const safePaymentMethod: PaymentMethod =
+      meta.paymentMethod === 'upi' && isValidUpiId(cafeData.settings.upiId)
+        ? 'upi'
+        : 'cash';
+    const safePaymentStatus: PaymentStatus =
+      safePaymentMethod === 'upi' ? 'pending_verification' : 'unpaid';
+    const safeUpiRefNote =
+      safePaymentMethod === 'upi' ? (meta.upiRefNote || '').trim().slice(0, 64) : '';
+
     const record: HomeOrderRecord = {
-      id: `hom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `hom-${deterministicDocId}`,
       orderCode,
       timestamp: new Date().toISOString(),
       gmail: normGmail || undefined,
       customerName: homeDetails.customerName.trim() || 'Customer',
       alternatePhone: homeDetails.alternatePhone.trim(),
-      wardArea: homeDetails.wardArea.trim(),
-      geoLocationUrl: homeDetails.geoLocationUrl.trim(),
+      ward: cleanWard || undefined,
+      area: cleanArea || undefined,
+      wardArea: cleanWardArea,
+      deliveryAddress: cleanDeliveryAddress || undefined,
+      geoLocationUrl: safeGeoUrl,
       customerNote: homeDetails.customerNote.trim(),
       items: lineItems,
       deliveryFee,
+      pointsRedeemed: appliedPointsRedeemed > 0 ? appliedPointsRedeemed : undefined,
+      pointsDiscount: appliedPointsDiscount > 0 ? appliedPointsDiscount : undefined,
+      paymentMethod: safePaymentMethod,
+      paymentStatus: safePaymentStatus,
+      upiRefNote: safeUpiRefNote || undefined,
       totalAmount,
       isFlagged: highQty.isFlagged,
       flagReason: highQty.isFlagged ? highQty.reason : undefined,
       referralCodeUsed: activePendingRef,
       referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
+      orderStatus: 'pending',
+      sourcePlatform: getActiveOrderPlatform(),
+      cloudDocId: authUser?.phoneNumber ? deterministicDocId : undefined,
+      idempotencyKey: deterministicDocId,
     };
 
     setHomeOrders((prev) => [record, ...prev]);
@@ -1534,18 +2318,24 @@ export default function App() {
 
     const earnedPoints =
       cafeData.settings.loyaltyEnabled !== false
-        ? computeOrderPointsEstimate(itemsSubtotal, cafeData.settings)
+        ? computeOrderPointsEstimate(discountedSubtotal, cafeData.settings)
         : 0;
     recordOrderLoyalty({
       orderCode: record.orderCode,
       orderMode: 'home',
-      purchaseAmount: itemsSubtotal,
+      purchaseAmount: discountedSubtotal,
       pointsToAdd: earnedPoints,
-      orderLabel: `Home Order ${record.orderCode} (₹${itemsSubtotal})`,
+      pointsToDeduct: appliedPointsRedeemed,
+      discountApplied: appliedPointsDiscount,
+      orderLabel: `Home Order ${record.orderCode} (₹${discountedSubtotal})`,
       customerLabel: `${record.customerName}${record.alternatePhone ? ` · ${record.alternatePhone}` : ''}`,
       verifiedReferralCode: activePendingRef,
       verifiedReferralSpins: activePendingRef ? refSpinsSetting : undefined,
     });
+
+    // Reset redemption toggle & UTR note immediately after recording to prevent double reuse
+    setHomeRedeemPoints(false);
+    setHomeUpiRefNote('');
 
     if (normGmail) {
       const lastItems: SavedHomeOrderItem[] = selectedItems.map((item) => ({
@@ -1557,8 +2347,11 @@ export default function App() {
         gmail: normGmail,
         customerName: homeDetails.customerName.trim(),
         alternatePhone: homeDetails.alternatePhone.trim(),
-        wardArea: homeDetails.wardArea.trim(),
-        geoLocationUrl: homeDetails.geoLocationUrl.trim(),
+        ward: cleanWard,
+        area: cleanArea,
+        wardArea: cleanWardArea,
+        deliveryAddress: cleanDeliveryAddress,
+        geoLocationUrl: safeGeoUrl,
         customerNote: homeDetails.customerNote.trim(),
         lastItems,
         lastOrderAt: new Date().toISOString(),
@@ -1581,9 +2374,163 @@ export default function App() {
       defaultName: homeDetails.customerName.trim(),
       earnedPoints,
     });
+
+    if (authUser && authUser.phoneNumber) {
+      const cloudPayload = {
+        orderCode: record.orderCode,
+        orderMode: 'home' as const,
+        items: lineItems,
+        customerName: record.customerName,
+        alternatePhone: record.alternatePhone,
+        gmail: record.gmail,
+        ward: cleanWard,
+        area: cleanArea,
+        wardArea: record.wardArea,
+        deliveryAddress: cleanDeliveryAddress,
+        geoLocationUrl: record.geoLocationUrl,
+        customerNote: record.customerNote,
+        deliveryFee: record.deliveryFee,
+        pointsRedeemed: appliedPointsRedeemed,
+        pointsDiscount: appliedPointsDiscount,
+        paymentMethod: safePaymentMethod,
+        paymentStatus: safePaymentStatus,
+        upiRefNote: safeUpiRefNote,
+        totalAmount: record.totalAmount,
+        isFlagged: record.isFlagged,
+        flagReason: record.flagReason,
+        referralCodeUsed: record.referralCodeUsed,
+        referralSpinsAwarded: record.referralSpinsAwarded,
+        orderStatus: 'pending' as const,
+        sourcePlatform: getActiveOrderPlatform(),
+        cloudDocId: deterministicDocId,
+        idempotencyKey: deterministicDocId,
+      };
+      if (isOnline) {
+        void saveCustomerOrderSummary(authUser, cloudPayload).catch((err) => {
+          console.warn('Cloud order queued for retry:', err);
+          setPendingSyncQueue((q) =>
+            enqueuePendingSyncItem(q, {
+              kind: 'order',
+              recordId: deterministicDocId,
+              payload: cloudPayload,
+              enqueuedAt: Date.now(),
+            })
+          );
+        });
+      } else {
+        setPendingSyncQueue((q) =>
+          enqueuePendingSyncItem(q, {
+            kind: 'order',
+            recordId: deterministicDocId,
+            payload: cloudPayload,
+            enqueuedAt: Date.now(),
+          })
+        );
+      }
+    }
+  };
+
+  const handleUpdateHomeOrderStatus = (id: string, nextStatus: OrderStatus) => {
+    const safeStatus = normalizeOrderStatus(nextStatus);
+    const cloudTarget = adminCloudHomeOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId && adminCloudUser) {
+      void updateAdminCloudOrderStatus(cloudTarget.cloudDocId, safeStatus).catch(
+        (err) => console.warn('Cloud home order status update failed:', err)
+      );
+    }
+    setHomeOrders((prev) =>
+      prev.map((o) =>
+        o.id === id || (cloudTarget?.cloudDocId && o.cloudDocId === cloudTarget.cloudDocId)
+          ? {
+              ...o,
+              orderStatus: safeStatus,
+              statusUpdatedAt: new Date().toISOString(),
+            }
+          : o
+      )
+    );
+  };
+
+  const handleUpdateTableOrderStatus = (id: string, nextStatus: OrderStatus) => {
+    const safeStatus = normalizeOrderStatus(nextStatus);
+    const cloudTarget = adminCloudTableOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId && adminCloudUser) {
+      void updateAdminCloudOrderStatus(cloudTarget.cloudDocId, safeStatus).catch(
+        (err) => console.warn('Cloud table order status update failed:', err)
+      );
+    }
+    setTableOrders((prev) =>
+      prev.map((o) =>
+        o.id === id || (cloudTarget?.cloudDocId && o.cloudDocId === cloudTarget.cloudDocId)
+          ? {
+              ...o,
+              orderStatus: safeStatus,
+              statusUpdatedAt: new Date().toISOString(),
+            }
+          : o
+      )
+    );
+  };
+
+  const handleVerifyHomeOrderPayment = (
+    id: string,
+    nextStatus: PaymentStatus
+  ) => {
+    const cloudTarget = adminCloudHomeOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId && adminCloudUser) {
+      void verifyAdminCloudOrderPayment(cloudTarget.cloudDocId, nextStatus).catch(
+        (err) => console.warn('Cloud home order payment verification failed:', err)
+      );
+    }
+    const verifiedAt = nextStatus === 'paid' ? new Date().toISOString() : undefined;
+    setHomeOrders((prev) =>
+      prev.map((o) =>
+        o.id === id || (cloudTarget?.cloudDocId && o.cloudDocId === cloudTarget.cloudDocId)
+          ? {
+              ...o,
+              paymentStatus: nextStatus,
+              paymentVerifiedAt: verifiedAt,
+            }
+          : o
+      )
+    );
+  };
+
+  const handleVerifyTableOrderPayment = (
+    id: string,
+    nextStatus: PaymentStatus
+  ) => {
+    const cloudTarget = adminCloudTableOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId && adminCloudUser) {
+      void verifyAdminCloudOrderPayment(cloudTarget.cloudDocId, nextStatus).catch(
+        (err) => console.warn('Cloud table order payment verification failed:', err)
+      );
+    }
+    const verifiedAt = nextStatus === 'paid' ? new Date().toISOString() : undefined;
+    setTableOrders((prev) =>
+      prev.map((o) =>
+        o.id === id || (cloudTarget?.cloudDocId && o.cloudDocId === cloudTarget.cloudDocId)
+          ? {
+              ...o,
+              paymentStatus: nextStatus,
+              paymentVerifiedAt: verifiedAt,
+            }
+          : o
+      )
+    );
   };
 
   const handleToggleHomeOrderFlag = (id: string) => {
+    const cloudTarget = adminCloudHomeOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId) {
+      const nextFlagged = !cloudTarget.isFlagged;
+      void toggleAdminCloudOrderFlag(
+        cloudTarget.cloudDocId,
+        nextFlagged,
+        nextFlagged ? cloudTarget.flagReason || 'Manually flagged by Admin' : ''
+      ).catch((err) => console.warn('Cloud flag update failed:', err));
+      return;
+    }
     setHomeOrders((prev) =>
       prev.map((o) =>
         o.id === id
@@ -1600,6 +2547,16 @@ export default function App() {
   };
 
   const handleToggleTableOrderFlag = (id: string) => {
+    const cloudTarget = adminCloudTableOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId) {
+      const nextFlagged = !cloudTarget.isFlagged;
+      void toggleAdminCloudOrderFlag(
+        cloudTarget.cloudDocId,
+        nextFlagged,
+        nextFlagged ? cloudTarget.flagReason || 'Manually flagged by Admin' : ''
+      ).catch((err) => console.warn('Cloud flag update failed:', err));
+      return;
+    }
     setTableOrders((prev) =>
       prev.map((o) =>
         o.id === id
@@ -1616,10 +2573,24 @@ export default function App() {
   };
 
   const handleDeleteHomeOrder = (id: string) => {
+    const cloudTarget = adminCloudHomeOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId) {
+      void deleteAdminCloudOrder(cloudTarget.cloudDocId).catch((err) =>
+        console.warn('Cloud order delete failed:', err)
+      );
+      return;
+    }
     setHomeOrders((prev) => prev.filter((o) => o.id !== id));
   };
 
   const handleDeleteTableOrder = (id: string) => {
+    const cloudTarget = adminCloudTableOrders.find((o) => o.id === id);
+    if (cloudTarget?.cloudDocId) {
+      void deleteAdminCloudOrder(cloudTarget.cloudDocId).catch((err) =>
+        console.warn('Cloud order delete failed:', err)
+      );
+      return;
+    }
     setTableOrders((prev) => prev.filter((o) => o.id !== id));
   };
 
@@ -1628,12 +2599,103 @@ export default function App() {
     setTableOrders([]);
   };
 
-  const handleResetDefaults = () => {
-    setCafeData(DEFAULT_CAFE_DATA);
+  const handleImportFullBackup = (backup: FullCafeBackupPayload) => {
+    if (Array.isArray(backup.homeOrders)) {
+      setHomeOrders((prev) =>
+        mergeRecordsByKey(prev, backup.homeOrders, (o) => o.orderCode || o.id)
+      );
+    }
+    if (Array.isArray(backup.tableOrders)) {
+      setTableOrders((prev) =>
+        mergeRecordsByKey(prev, backup.tableOrders, (o) => o.orderCode || o.id)
+      );
+    }
+    if (
+      backup.savedHomeProfiles &&
+      typeof backup.savedHomeProfiles === 'object'
+    ) {
+      setSavedHomeProfiles((prev) => ({
+        ...backup.savedHomeProfiles,
+        ...prev,
+      }));
+    }
+    if (Array.isArray(backup.referralRecords)) {
+      setReferralRecords((prev) =>
+        mergeRecordsByKey(
+          prev,
+          backup.referralRecords,
+          (r) => r.orderCode || r.id
+        )
+      );
+    }
+    if (Array.isArray(backup.ratings)) {
+      setRatings((prev) =>
+        mergeRecordsByKey(prev, backup.ratings, (r) => r.id)
+      );
+    }
+    if (Array.isArray(backup.vibeSnaps)) {
+      setVibeSnaps((prev) =>
+        mergeRecordsByKey(prev, backup.vibeSnaps, (s) => s.id)
+      );
+    }
+  };
+
+  const handleConnectAdminCloud = async (): Promise<boolean> => {
+    setAdminCloudError(null);
     try {
-      localStorage.removeItem(STORAGE_KEY);
+      const verifiedUser = await loginAdminCloudWithGoogle();
+      setAdminCloudUser(verifiedUser);
+      return true;
+    } catch (err) {
+      setAdminCloudError(
+        err instanceof Error ? err.message : 'Google Admin sign-in failed.'
+      );
+      return false;
+    }
+  };
+
+  const handleDisconnectAdminCloud = async () => {
+    try {
+      await logoutAdminCloud();
+    } catch {
+      // Ignore signout error
+    }
+  };
+
+  const handleUpdateCafeData = (nextData: CafeStoreData) => {
+    setCafeData(nextData);
+    if (adminCloudUser) {
+      void saveCloudStoreCatalog(nextData, adminCloudUser.email || '').catch(
+        (err) => console.warn('Live catalog sync error:', err)
+      );
+    }
+  };
+
+  const handleResetDefaults = () => {
+    const preservedAdminSettings: CafeStoreData = {
+      ...DEFAULT_CAFE_DATA,
+      settings: {
+        ...DEFAULT_CAFE_DATA.settings,
+        adminId: cafeData.settings.adminId,
+        adminMobile: cafeData.settings.adminMobile,
+        adminPin: cafeData.settings.adminPin,
+      },
+    };
+    setCafeData(preservedAdminSettings);
+    try {
+      safeLocalStorageSet(
+        STORAGE_KEY,
+        JSON.stringify(preservedAdminSettings),
+        'Menu & Settings'
+      );
     } catch {
       // Ignore
+    }
+    if (adminCloudUser) {
+      void saveCloudStoreCatalog(
+        preservedAdminSettings,
+        adminCloudUser.email || ''
+      ).catch((err) => console.warn('Reset catalog cloud sync skipped:', err));
     }
   };
 
@@ -1647,6 +2709,7 @@ export default function App() {
   }) => {
     const newRating: CafeRatingRecord = {
       id: `rat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      authorUid: authUser?.uid || adminCloudUser?.uid,
       authorName: payload.authorName,
       stars: payload.stars,
       comment: payload.comment,
@@ -1654,12 +2717,47 @@ export default function App() {
       orderCode: payload.orderCode,
       createdAt: new Date().toISOString(),
       isSample: false,
+      sourcePlatform: getActiveOrderPlatform(),
     };
     setRatings((prev) => [newRating, ...prev]);
+
+    const actor = authUser?.phoneNumber ? authUser : adminCloudUser;
+    if (actor) {
+      if (isOnline) {
+        void saveCloudReview(
+          actor,
+          newRating,
+          !authUser?.phoneNumber && Boolean(adminCloudUser)
+        ).catch(() => {
+          setPendingSyncQueue((q) =>
+            enqueuePendingSyncItem(q, {
+              kind: 'review',
+              recordId: newRating.id,
+              payload: newRating,
+              enqueuedAt: Date.now(),
+            })
+          );
+        });
+      } else {
+        setPendingSyncQueue((q) =>
+          enqueuePendingSyncItem(q, {
+            kind: 'review',
+            recordId: newRating.id,
+            payload: newRating,
+            enqueuedAt: Date.now(),
+          })
+        );
+      }
+    }
   };
 
   const handleDeleteRating = (id: string) => {
     setRatings((prev) => prev.filter((r) => r.id !== id));
+    if (adminCloudUser) {
+      void deleteCloudReview(id).catch((err) =>
+        console.warn('Cloud review delete skipped:', err)
+      );
+    }
   };
 
   const handleRestoreStarterRatings = () => {
@@ -1787,7 +2885,8 @@ export default function App() {
     }
 
     const newRec: ReferralRecord = {
-      id: `refman-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `refman-${orderCode.replace(/[^a-zA-Z0-9_-]/g, '')}`,
+      customerUid: adminCloudUser?.uid || authUser?.uid,
       orderCode,
       orderMode: payload.orderMode,
       referralCode,
@@ -1797,9 +2896,15 @@ export default function App() {
       status: 'credited',
       note: payload.note.trim() || 'Verified by Admin from WhatsApp tag',
       timestamp: new Date().toISOString(),
+      sourcePlatform: getActiveOrderPlatform(),
     };
 
     setReferralRecords((prev) => [newRec, ...prev]);
+    if (adminCloudUser) {
+      void saveCloudReferralRecord(adminCloudUser, newRec, true).catch((err) =>
+        console.warn('Cloud manual referral save skipped:', err)
+      );
+    }
     setLoyalty((prev) => ({
       ...prev,
       creditedOrderIds: [...(prev.creditedOrderIds || []), orderCode],
@@ -1836,6 +2941,13 @@ export default function App() {
     const appliedDelta =
       target.status === 'revoked' ? nextSpins : nextSpins - prevSpins;
 
+    if (adminCloudUser) {
+      void updateCloudReferralRecord(target.cloudDocId || target.id, {
+        spinsAwarded: nextSpins,
+        status: 'adjusted',
+      }).catch((err) => console.warn('Cloud referral update skipped:', err));
+    }
+
     setReferralRecords((prev) =>
       prev.map((r) =>
         r.id === id
@@ -1868,13 +2980,21 @@ export default function App() {
     const target = referralRecords.find((r) => r.id === id);
     if (!target) return;
     const willRevoke = target.status !== 'revoked';
+    const nextStatus = willRevoke ? 'revoked' : 'credited';
+
+    if (adminCloudUser) {
+      void updateCloudReferralRecord(target.cloudDocId || target.id, {
+        spinsAwarded: target.spinsAwarded,
+        status: nextStatus,
+      }).catch((err) => console.warn('Cloud referral status update skipped:', err));
+    }
 
     setReferralRecords((prev) =>
       prev.map((r) =>
         r.id === id
           ? {
               ...r,
-              status: willRevoke ? 'revoked' : 'credited',
+              status: nextStatus,
             }
           : r
       )
@@ -1901,6 +3021,11 @@ export default function App() {
 
   const handleDeleteReferralRecord = (id: string) => {
     const target = referralRecords.find((r) => r.id === id);
+    if (adminCloudUser) {
+      void deleteCloudReferralRecord(target?.cloudDocId || id).catch((err) =>
+        console.warn('Cloud referral delete skipped:', err)
+      );
+    }
     setReferralRecords((prev) => prev.filter((r) => r.id !== id));
     if (target && target.status !== 'revoked') {
       setLoyalty((prev) => ({
@@ -1952,17 +3077,61 @@ export default function App() {
   };
 
   const handlePublishSnap = (snap: VibeSnapRecord) => {
-    setVibeSnaps((prev) => [snap, ...prev].slice(0, 24));
+    const cloudSnap: VibeSnapRecord = {
+      ...snap,
+      authorUid: authUser?.uid || adminCloudUser?.uid,
+      sourcePlatform: getActiveOrderPlatform(),
+    };
+    setVibeSnaps((prev) => [cloudSnap, ...prev].slice(0, 24));
     if (cafeData.settings.loyaltyEnabled !== false) {
       awardLoyaltyPoints(5, 'Cafe Snap Shared on Vibe Wall', 'Snap Star 📸');
+    }
+
+    const actor = authUser?.phoneNumber ? authUser : adminCloudUser;
+    if (actor) {
+      if (isOnline) {
+        void saveCloudVibeSnap(
+          actor,
+          cloudSnap,
+          !authUser?.phoneNumber && Boolean(adminCloudUser)
+        ).catch(() => {
+          setPendingSyncQueue((q) =>
+            enqueuePendingSyncItem(q, {
+              kind: 'vibeSnap',
+              recordId: cloudSnap.id,
+              payload: cloudSnap,
+              enqueuedAt: Date.now(),
+            })
+          );
+        });
+      } else {
+        setPendingSyncQueue((q) =>
+          enqueuePendingSyncItem(q, {
+            kind: 'vibeSnap',
+            recordId: cloudSnap.id,
+            payload: cloudSnap,
+            enqueuedAt: Date.now(),
+          })
+        );
+      }
     }
   };
 
   const handleDeleteSnap = (id: string) => {
     setVibeSnaps((prev) => prev.filter((s) => s.id !== id));
+    if (adminCloudUser) {
+      void deleteCloudVibeSnap(id).catch((err) =>
+        console.warn('Cloud snap delete skipped:', err)
+      );
+    }
   };
 
   const handleClearAllSnaps = () => {
+    if (adminCloudUser) {
+      vibeSnaps.forEach((s) => {
+        void deleteCloudVibeSnap(s.id).catch(() => {});
+      });
+    }
     setVibeSnaps([]);
   };
 
@@ -2053,6 +3222,19 @@ export default function App() {
             </a>
             <button
               type="button"
+              onClick={() => setIsPhoneAuthOpen(true)}
+              className={`hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                authUser
+                  ? 'text-[#15803D] font-semibold'
+                  : 'hover:text-stone-900'
+              }`}
+            >
+              {authUser
+                ? formatPhoneDisplay(authUser.phoneNumber)
+                : 'OTP Login'}
+            </button>
+            <button
+              type="button"
               onClick={() => setIsAdminOpen(true)}
               className="hover:text-stone-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
@@ -2103,6 +3285,29 @@ export default function App() {
               <span className="text-[11px] font-semibold bg-black/20 px-2.5 py-1 rounded-lg self-start sm:self-auto whitespace-nowrap shrink-0">
                 Orders Paused
               </span>
+            </div>
+          </div>
+        )}
+
+        {/* Storage Quota Warning Banner (Shown proactively >=75% or on QuotaExceededError) */}
+        {storageWarning && (
+          <div
+            role="alert"
+            className="bg-amber-50 text-amber-950 border-b border-amber-300"
+          >
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 py-2.5 flex items-center justify-between gap-3 text-xs">
+              <span className="font-semibold">{storageWarning}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setStorageWarning(null);
+                  setProactiveWarningDismissed(true);
+                }}
+                aria-label="Dismiss storage warning"
+                className="p-1 rounded-lg hover:bg-amber-200/60 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           </div>
         )}
@@ -2189,6 +3394,27 @@ export default function App() {
                       {averageRatingDisplay} ({ratings.length} reviews)
                     </span>
                   </a>
+                  <button
+                    type="button"
+                    onClick={() => setIsPhoneAuthOpen(true)}
+                    className={`min-h-[40px] px-3.5 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors tabular-nums ${
+                      authUser
+                        ? 'bg-[#15803D]/10 hover:bg-[#15803D]/15 border-[#15803D]/30 text-[#15803D]'
+                        : 'bg-white hover:bg-stone-50 border-stone-200 text-stone-800'
+                    }`}
+                  >
+                    {authUser ? (
+                      <>
+                        <ShieldCheck className="w-3.5 h-3.5 text-[#15803D]" />
+                        <span>{formatPhoneDisplay(authUser.phoneNumber)}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Phone className="w-3.5 h-3.5 text-[#C83E2B]" />
+                        <span>Mobile OTP Login</span>
+                      </>
+                    )}
+                  </button>
                   <PWAInstallButton />
                 </div>
               </div>
@@ -3021,7 +4247,16 @@ export default function App() {
         </div>
       )}
 
-      <OfflineStatusBanner />
+      <OfflineStatusBanner pendingSyncCount={pendingSyncQueue.length} />
+
+      {backExitNotice && (
+        <div
+          role="status"
+          className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-stone-900 text-white text-xs font-semibold shadow-xl border border-stone-700 whitespace-nowrap"
+        >
+          ऐप बंद करने के लिए दोबारा Back दबाएं (Press Back again to exit)
+        </div>
+      )}
 
       {/* Side-Docked Cafe Snap Button */}
       <button
@@ -3045,8 +4280,16 @@ export default function App() {
         loyalty={loyalty}
         tableNumber={tableNumber}
         onTableNumberChange={setTableNumber}
+        customerPhone={dineInPhone}
+        onCustomerPhoneChange={setDineInPhone}
         customerNote={customerNote}
         onCustomerNoteChange={setCustomerNote}
+        redeemPoints={dineInRedeemPoints}
+        onRedeemPointsChange={setDineInRedeemPoints}
+        paymentMethod={dineInPaymentMethod}
+        onPaymentMethodChange={setDineInPaymentMethod}
+        upiRefNote={dineInUpiRefNote}
+        onUpiRefNoteChange={setDineInUpiRefNote}
         onAddOneMore={(product) => {
           setDineInCart((prev) => {
             const existingUnsent = prev.find(
@@ -3090,8 +4333,17 @@ export default function App() {
         savedGmails={savedGmailsList}
         loadedProfileGmail={loadedProfileGmail}
         lastOrderAt={lastOrderAt}
+        verifiedPhone={authUser?.phoneNumber || null}
+        redeemPoints={homeRedeemPoints}
+        onRedeemPointsChange={setHomeRedeemPoints}
+        paymentMethod={homePaymentMethod}
+        onPaymentMethodChange={setHomePaymentMethod}
+        upiRefNote={homeUpiRefNote}
+        onUpiRefNoteChange={setHomeUpiRefNote}
+        onOpenPhoneAuth={() => setIsPhoneAuthOpen(true)}
         onGmailChange={handleHomeGmailChange}
         onDetailsChange={setHomeDetails}
+        onClearGpsPin={handleClearHomeGpsPin}
         onUpdateLineQuantity={handleUpdateHomeLineQuantity}
         onToggleLineSelected={handleToggleHomeLineSelected}
         onRemoveLine={handleRemoveHomeLine}
@@ -3129,6 +4381,7 @@ export default function App() {
         onClose={() => setIsSnapOpen(false)}
         cafeName={cafeData.settings.cafeName}
         onPublishSnap={handlePublishSnap}
+        storageWarning={storageWarning}
       />
 
       {/* Protected Admin Modal */}
@@ -3136,16 +4389,30 @@ export default function App() {
         isOpen={isAdminOpen}
         onClose={() => setIsAdminOpen(false)}
         data={cafeData}
-        homeOrders={homeOrders}
-        tableOrders={tableOrders}
+        homeOrders={mergedAdminHomeOrders}
+        tableOrders={mergedAdminTableOrders}
         referralRecords={referralRecords}
         loyalty={loyalty}
         ratings={ratings}
         vibeSnaps={vibeSnaps}
-        onUpdateData={setCafeData}
+        savedHomeProfiles={savedHomeProfiles}
+        onImportFullBackup={handleImportFullBackup}
+        adminCloudEmail={adminCloudUser?.email || null}
+        adminCloudError={adminCloudError}
+        cloudOrdersCount={
+          adminCloudHomeOrders.length + adminCloudTableOrders.length
+        }
+        pendingSyncCount={pendingSyncQueue.length}
+        onConnectAdminCloud={handleConnectAdminCloud}
+        onDisconnectAdminCloud={handleDisconnectAdminCloud}
+        onUpdateData={handleUpdateCafeData}
         onResetDefaults={handleResetDefaults}
         onToggleHomeOrderFlag={handleToggleHomeOrderFlag}
         onToggleTableOrderFlag={handleToggleTableOrderFlag}
+        onUpdateHomeOrderStatus={handleUpdateHomeOrderStatus}
+        onUpdateTableOrderStatus={handleUpdateTableOrderStatus}
+        onVerifyHomeOrderPayment={handleVerifyHomeOrderPayment}
+        onVerifyTableOrderPayment={handleVerifyTableOrderPayment}
         onDeleteHomeOrder={handleDeleteHomeOrder}
         onDeleteTableOrder={handleDeleteTableOrder}
         onClearAllOrders={handleClearAllOrders}
@@ -3158,6 +4425,30 @@ export default function App() {
         onRestoreStarterRatings={handleRestoreStarterRatings}
         onDeleteSnap={handleDeleteSnap}
         onClearAllSnaps={handleClearAllSnaps}
+      />
+
+      {/* Customer Mobile OTP Authentication & Secure Profile Modal */}
+      <PhoneAuthModal
+        isOpen={isPhoneAuthOpen}
+        onClose={() => setIsPhoneAuthOpen(false)}
+        authUser={authUser}
+        profile={customerProfile}
+        orders={customerCloudOrders}
+        currentHomeDetails={homeDetails}
+        onProfileSaved={(saved) => {
+          setHomeDetails((prev) => ({
+            ...prev,
+            customerName: saved.customerName,
+            gmail: saved.gmail,
+            ward: saved.ward,
+            area: saved.area,
+            wardArea: saved.wardArea,
+            deliveryAddress: saved.deliveryAddress,
+            geoLocationUrl: sanitizeGpsLocationUrl(saved.geoLocationUrl),
+            customerNote: saved.customerNote,
+          }));
+        }}
+        onClearGpsPin={handleClearHomeGpsPin}
       />
     </div>
   );

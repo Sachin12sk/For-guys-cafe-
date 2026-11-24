@@ -22,6 +22,10 @@ import {
   Gift,
   Link2,
   Store,
+  QrCode,
+  Smartphone,
+  Cloud,
+  ShieldCheck,
 } from 'lucide-react';
 import type {
   CafeRatingRecord,
@@ -33,14 +37,31 @@ import type {
   HomeOrderRecord,
   LoyaltyState,
   OrderMode,
+  OrderStatus,
+  PaymentStatus,
   Product,
   ReferralRecord,
+  SavedHomeCustomerProfile,
   SocialLinkItem,
   TableOrderRecord,
   VibeSnapRecord,
 } from '../types';
+import {
+  buildFullBackupPayload,
+  measureLocalStorageUsage,
+  normalizeHomeMinOrder,
+  parseAndValidateBackupJson,
+  sanitizeMenuForExport,
+  type FullCafeBackupPayload,
+} from '../utils/storage';
 import { compressImageFileToDataUrl } from '../utils/imageUpload';
 import { sanitizeWhatsappNumber } from '../utils/whatsapp';
+import {
+  buildCafeQrOrderUrl,
+  generateQrDataUrl,
+  isValidUpiId,
+  normalizeUpiId,
+} from '../utils/upi';
 import {
   formatCooldownTime,
   getAdminLockState,
@@ -65,10 +86,22 @@ interface AdminModalProps {
   loyalty: LoyaltyState;
   ratings: CafeRatingRecord[];
   vibeSnaps: VibeSnapRecord[];
+  savedHomeProfiles: Record<string, SavedHomeCustomerProfile>;
+  onImportFullBackup?: (backup: FullCafeBackupPayload) => void;
+  adminCloudEmail?: string | null;
+  adminCloudError?: string | null;
+  cloudOrdersCount?: number;
+  pendingSyncCount?: number;
+  onConnectAdminCloud?: () => Promise<boolean> | void;
+  onDisconnectAdminCloud?: () => void;
   onUpdateData: (nextData: CafeStoreData) => void;
   onResetDefaults: () => void;
   onToggleHomeOrderFlag: (id: string) => void;
   onToggleTableOrderFlag: (id: string) => void;
+  onUpdateHomeOrderStatus?: (id: string, status: OrderStatus) => void;
+  onUpdateTableOrderStatus?: (id: string, status: OrderStatus) => void;
+  onVerifyHomeOrderPayment?: (id: string, nextStatus: PaymentStatus) => void;
+  onVerifyTableOrderPayment?: (id: string, nextStatus: PaymentStatus) => void;
   onDeleteHomeOrder: (id: string) => void;
   onDeleteTableOrder: (id: string) => void;
   onClearAllOrders: () => void;
@@ -113,10 +146,22 @@ export function AdminModal({
   loyalty,
   ratings,
   vibeSnaps,
+  savedHomeProfiles,
+  onImportFullBackup,
+  adminCloudEmail,
+  adminCloudError,
+  cloudOrdersCount,
+  pendingSyncCount = 0,
+  onConnectAdminCloud,
+  onDisconnectAdminCloud,
   onUpdateData,
   onResetDefaults,
   onToggleHomeOrderFlag,
   onToggleTableOrderFlag,
+  onUpdateHomeOrderStatus,
+  onUpdateTableOrderStatus,
+  onVerifyHomeOrderPayment,
+  onVerifyTableOrderPayment,
   onDeleteHomeOrder,
   onDeleteTableOrder,
   onClearAllOrders,
@@ -133,6 +178,8 @@ export function AdminModal({
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [adminIdInput, setAdminIdInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
+  const [showOfflinePasscodeForm, setShowOfflinePasscodeForm] = useState(false);
+  const [connectingAdminCloud, setConnectingAdminCloud] = useState(false);
   const [authError, setAuthError] = useState('');
   const [lockState, setLockState] = useState<AdminLockState>(() =>
     getAdminLockState()
@@ -180,15 +227,46 @@ export function AdminModal({
   const [jsonError, setJsonError] = useState('');
   const [copiedJson, setCopiedJson] = useState(false);
 
+  // Table & Home Delivery QR Generator state
+  const [qrTargetMode, setQrTargetMode] = useState<OrderMode>('dine-in');
+  const [qrTableLabel, setQrTableLabel] = useState('Table 1');
+  const [qrPreviewDataUrl, setQrPreviewDataUrl] = useState('');
+  const [copiedQrUrl, setCopiedQrUrl] = useState(false);
+
   const lockRemainingSeconds =
     lockState.lockedUntilMs && lockState.lockedUntilMs > lockNowMs
       ? Math.ceil((lockState.lockedUntilMs - lockNowMs) / 1000)
       : 0;
   const isLoginLocked = lockRemainingSeconds > 0;
 
+  const currentOriginBase =
+    typeof window !== 'undefined'
+      ? `${window.location.origin}${window.location.pathname}`
+      : 'https://fourguyscafe.example.com/';
+  const generatedQrTargetUrl = buildCafeQrOrderUrl({
+    baseUrl: currentOriginBase,
+    mode: qrTargetMode,
+    tableLabel: qrTableLabel,
+  });
+
   useEffect(() => {
     setSettingsForm(data.settings);
   }, [data.settings]);
+
+  useEffect(() => {
+    if (!isOpen || !isAuthenticated || activeTab !== 'settings') return;
+    let cancelled = false;
+    void generateQrDataUrl(generatedQrTargetUrl, 360)
+      .then((url) => {
+        if (!cancelled) setQrPreviewDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setQrPreviewDataUrl('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, isAuthenticated, activeTab, generatedQrTargetUrl]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -220,6 +298,47 @@ export function AdminModal({
     }, 2800);
   };
 
+  const configuredAdminPin = (data.settings.adminPin || '').trim();
+  const hasSavedOfflinePasscode = Boolean(configuredAdminPin);
+
+  const unlockAdminDashboard = () => {
+    resetAdminLockState();
+    setLockState({ failedAttempts: 0, lockedUntilMs: null });
+    setIsAuthenticated(true);
+    setAuthError('');
+    setAdminIdInput('');
+    setPasswordInput('');
+    setShowOfflinePasscodeForm(false);
+    setSettingsForm(data.settings);
+    setHomeMinInput(data.settings.homeMinOrder ?? 150);
+    setHomeDeliveryFeeInput(data.settings.homeDeliveryFee ?? 0);
+    setHomeWaInput(data.settings.homeWhatsappNumber || '');
+    setHomeNoteInput(data.settings.homeDeliveryNote || '');
+  };
+
+  const handleFirebaseAdminSignIn = async () => {
+    setAuthError('');
+    if (adminCloudEmail) {
+      unlockAdminDashboard();
+      flashStatus(`Signed in via Firebase Admin (${adminCloudEmail})`);
+      return;
+    }
+    if (!onConnectAdminCloud) {
+      setAuthError('Firebase Admin authentication handler is unavailable.');
+      return;
+    }
+    setConnectingAdminCloud(true);
+    try {
+      const ok = await onConnectAdminCloud();
+      if (ok) {
+        unlockAdminDashboard();
+        flashStatus('Verified via Firebase Admin Authentication');
+      }
+    } finally {
+      setConnectingAdminCloud(false);
+    }
+  };
+
   const handleLogin = (e: FormEvent) => {
     e.preventDefault();
     const now = Date.now();
@@ -235,10 +354,15 @@ export function AdminModal({
       return;
     }
 
+    if (!configuredAdminPin) {
+      setAuthError('No offline device passcode is saved here. Please sign in with Firebase Admin (Google).');
+      return;
+    }
+
     const enteredId = adminIdInput.trim();
     const enteredPass = passwordInput.trim();
-    const expectedId = (data.settings.adminId || '@pizza').trim();
-    const expectedMobile = (data.settings.adminMobile || '9651008080').replace(
+    const expectedId = (data.settings.adminId || '').trim();
+    const expectedMobile = (data.settings.adminMobile || '').replace(
       /\D/g,
       ''
     );
@@ -252,25 +376,15 @@ export function AdminModal({
         ? expectedMobile.slice(2)
         : expectedMobile;
 
-    const expectedPass = (data.settings.adminPin || 'Pizza@115115').trim();
-
-    const idMatches = enteredId.toLowerCase() === expectedId.toLowerCase();
+    const idMatches =
+      expectedId.length > 0 &&
+      enteredId.toLowerCase() === expectedId.toLowerCase();
     const mobileMatches =
       normalizedExpectedMobile.length > 0 &&
       normalizedEnteredMobile === normalizedExpectedMobile;
 
-    if ((idMatches || mobileMatches) && enteredPass === expectedPass) {
-      resetAdminLockState();
-      setLockState({ failedAttempts: 0, lockedUntilMs: null });
-      setIsAuthenticated(true);
-      setAuthError('');
-      setAdminIdInput('');
-      setPasswordInput('');
-      setSettingsForm(data.settings);
-      setHomeMinInput(data.settings.homeMinOrder ?? 150);
-      setHomeDeliveryFeeInput(data.settings.homeDeliveryFee ?? 0);
-      setHomeWaInput(data.settings.homeWhatsappNumber || '');
-      setHomeNoteInput(data.settings.homeDeliveryNote || '');
+    if ((idMatches || mobileMatches) && enteredPass === configuredAdminPin) {
+      unlockAdminDashboard();
     } else {
       const nextLock = recordFailedAdminAttempt(now);
       setLockState(nextLock);
@@ -596,7 +710,7 @@ export function AdminModal({
       homeWhatsappNumber: settingsForm.homeWhatsappNumber?.trim()
         ? sanitizeWhatsappNumber(settingsForm.homeWhatsappNumber)
         : '',
-      homeMinOrder: Math.max(0, Number(settingsForm.homeMinOrder) || 150),
+      homeMinOrder: normalizeHomeMinOrder(settingsForm.homeMinOrder),
       homeDeliveryFee: Math.max(
         0,
         Math.round(Number(settingsForm.homeDeliveryFee ?? 0))
@@ -606,12 +720,14 @@ export function AdminModal({
       socialLinks: cleanedLinks,
       isCafeOpen: settingsForm.isCafeOpen !== false,
       closedNotice: settingsForm.closedNotice?.trim() || '',
-      adminId: settingsForm.adminId.trim() || '@pizza',
-      adminMobile: (settingsForm.adminMobile || '9651008080').replace(
-        /\D/g,
-        ''
-      ),
-      adminPin: settingsForm.adminPin.trim() || 'Pizza@115115',
+      adminId: settingsForm.adminId.trim(),
+      adminMobile: (settingsForm.adminMobile || '').replace(/\D/g, ''),
+      adminPin:
+        settingsForm.adminPin.trim().length >= 6
+          ? settingsForm.adminPin.trim()
+          : settingsForm.adminPin.trim() === ''
+            ? ''
+            : data.settings.adminPin.trim(),
       orderCooldownSeconds: Math.max(
         0,
         Math.round(Number(settingsForm.orderCooldownSeconds ?? 120))
@@ -629,8 +745,17 @@ export function AdminModal({
         10,
         Math.round(Number(settingsForm.rewardThresholdPoints ?? 100))
       ),
+      pointsDiscountPerThreshold: Math.max(
+        1,
+        Math.round(Number(settingsForm.pointsDiscountPerThreshold ?? 30) || 30)
+      ),
       rewardLabel:
         settingsForm.rewardLabel?.trim() || 'Free Cold Drink or ₹30 Off',
+      upiId: normalizeUpiId(settingsForm.upiId),
+      upiPayeeName:
+        (settingsForm.upiPayeeName || '').trim() ||
+        settingsForm.cafeName.trim() ||
+        'FOUR GUYS CAFE',
       firstVisitSpins: Math.max(
         0,
         Math.round(Number(settingsForm.firstVisitSpins ?? 1))
@@ -661,7 +786,7 @@ export function AdminModal({
     setHomeDeliveryFeeInput(cleaned.homeDeliveryFee ?? 0);
     setHomeWaInput(cleaned.homeWhatsappNumber);
     onUpdateData({ ...data, settings: cleaned });
-    flashStatus('Cafe, WhatsApp, Social & Security settings saved');
+    flashStatus('Cafe, WhatsApp, UPI, Loyalty & Security settings saved');
   };
 
   const handleAddSocialLink = () => {
@@ -703,8 +828,8 @@ export function AdminModal({
     setSettingsForm({ ...settingsForm, socialLinks: nextLinks });
   };
 
-  // JSON Export / Import Handlers
-  const formattedExportJson = JSON.stringify(data, null, 2);
+  // JSON Export / Import Handlers (Strictly sanitized: never exports Admin PIN/ID/Mobile or OTP tokens)
+  const formattedExportJson = JSON.stringify(sanitizeMenuForExport(data), null, 2);
 
   const handleDownloadJson = () => {
     const blob = new Blob([formattedExportJson], { type: 'application/json' });
@@ -716,7 +841,32 @@ export function AdminModal({
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    flashStatus('Downloaded menu JSON');
+    flashStatus('Downloaded sanitized Menu JSON (Admin PIN excluded)');
+  };
+
+  const handleDownloadFullBackup = () => {
+    const payload = buildFullBackupPayload({
+      menuData: data,
+      homeOrders,
+      tableOrders,
+      savedHomeProfiles,
+      referralRecords,
+      ratings,
+      vibeSnaps,
+    });
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    a.download = `four-guys-cafe-full-backup-${dateStamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    flashStatus('Downloaded Full Safe Backup JSON (No PIN / OTP / Auth secrets)');
   };
 
   const handleCopyJson = async () => {
@@ -724,7 +874,7 @@ export function AdminModal({
       await navigator.clipboard.writeText(formattedExportJson);
       setCopiedJson(true);
       setTimeout(() => setCopiedJson(false), 2000);
-      flashStatus('Copied JSON to clipboard');
+      flashStatus('Copied sanitized JSON to clipboard');
     } catch {
       flashStatus('Copy failed — use Download JSON instead');
     }
@@ -732,38 +882,62 @@ export function AdminModal({
 
   const applyJsonString = (raw: string) => {
     setJsonError('');
-    try {
-      const parsed = JSON.parse(raw) as Partial<CafeStoreData>;
-      if (
-        !parsed ||
-        !parsed.settings ||
-        !Array.isArray(parsed.categories) ||
-        !Array.isArray(parsed.products)
-      ) {
-        setJsonError(
-          'Invalid format: JSON must contain settings, categories array, and products array.'
-        );
-        return;
-      }
-      const nextSettings = { ...data.settings, ...parsed.settings };
-      const nextCombos: ComboSet[] = Array.isArray(parsed.combos)
-        ? parsed.combos
-        : data.combos;
-      onUpdateData({
-        settings: nextSettings,
-        categories: parsed.categories,
-        products: parsed.products,
-        combos: nextCombos,
-      });
-      setSettingsForm(nextSettings);
-      setHomeMinInput(nextSettings.homeMinOrder ?? 150);
-      setHomeWaInput(nextSettings.homeWhatsappNumber || '');
-      setHomeNoteInput(nextSettings.homeDeliveryNote || '');
-      setJsonInput('');
-      flashStatus('Menu JSON imported and applied');
-    } catch {
-      setJsonError('Could not parse JSON. Check for syntax errors.');
+    const result = parseAndValidateBackupJson(raw);
+    if (!result.ok) {
+      setJsonError(result.error);
+      return;
     }
+
+    const parsed = result.menuData;
+    const isFullBackup = result.isFullBackup && Boolean(result.fullBackup);
+
+    // Preserve existing Admin credentials safely regardless of imported JSON contents
+    const nextSettings: CafeSettings = {
+      ...data.settings,
+      ...parsed.settings,
+      homeMinOrder: normalizeHomeMinOrder(
+        parsed.settings?.homeMinOrder ?? data.settings.homeMinOrder
+      ),
+      homeDeliveryFee: Math.max(
+        0,
+        Math.round(
+          Number(
+            parsed.settings?.homeDeliveryFee ??
+              data.settings.homeDeliveryFee ??
+              0
+          ) || 0
+        )
+      ),
+      adminId: data.settings.adminId,
+      adminMobile: data.settings.adminMobile,
+      adminPin: data.settings.adminPin,
+    };
+    const nextCombos: ComboSet[] = Array.isArray(parsed.combos)
+      ? parsed.combos
+      : data.combos;
+
+    onUpdateData({
+      settings: nextSettings,
+      categories: parsed.categories || data.categories,
+      products: parsed.products || data.products,
+      combos: nextCombos,
+    });
+
+    if (isFullBackup && result.fullBackup && onImportFullBackup) {
+      onImportFullBackup(result.fullBackup);
+    }
+
+    setSettingsForm(nextSettings);
+    setHomeMinInput(nextSettings.homeMinOrder);
+    setHomeDeliveryFeeInput(nextSettings.homeDeliveryFee ?? 0);
+    setHomeWaInput(nextSettings.homeWhatsappNumber || '');
+    setHomeNoteInput(nextSettings.homeDeliveryNote || '');
+    setJsonInput('');
+    flashStatus(
+      isFullBackup
+        ? 'Full Backup JSON restored safely (Delivery Fee & Records synced)'
+        : 'Menu JSON imported and applied (Delivery Fee synced)'
+    );
   };
 
   const handleJsonFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
@@ -871,97 +1045,170 @@ export function AdminModal({
         {/* Auth Gate or Dashboard */}
         {!isAuthenticated ? (
           <div className="p-6 sm:p-10 flex items-center justify-center flex-1 overflow-y-auto">
-            <form
-              onSubmit={handleLogin}
-              className="w-full max-w-sm bg-white rounded-2xl border border-stone-200 p-6 space-y-4 shadow-sm"
-            >
-              <div>
-                <h3 className="font-display text-xl font-bold text-stone-900">
-                  Admin Login
-                </h3>
-                <p className="text-xs text-stone-600 mt-1">
-                  Sign in with your Admin ID and Password to view live order feeds, Excel sheets, sales charts, PDF reports, and edit menu prices.
-                </p>
-              </div>
-
-              {isLoginLocked && (
-                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-[#C83E2B] font-semibold flex items-center gap-2 tabular-nums">
-                  <Clock className="w-4 h-4 shrink-0" />
-                  <span>
-                    Login locked after failed attempts — retry in{' '}
-                    {formatCooldownTime(lockRemainingSeconds)}
-                  </span>
+            <div className="w-full max-w-sm bg-white rounded-2xl border border-stone-200 p-6 space-y-4 shadow-sm">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-stone-900 text-white flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-5 h-5" />
                 </div>
-              )}
-
-              <div>
-                <label
-                  htmlFor="admin-id-input"
-                  className="block text-xs font-semibold text-stone-700 mb-1.5"
-                >
-                  Admin ID or Mobile Number
-                </label>
-                <input
-                  id="admin-id-input"
-                  type="text"
-                  autoFocus
-                  required
-                  disabled={isLoginLocked}
-                  autoComplete="username"
-                  value={adminIdInput}
-                  onChange={(e) => setAdminIdInput(e.target.value)}
-                  placeholder="Enter Admin ID (@pizza) or Mobile (9651008080)"
-                  className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-stone-300 bg-stone-50 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white disabled:opacity-50"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="admin-password-input"
-                  className="block text-xs font-semibold text-stone-700 mb-1.5"
-                >
-                  Password
-                </label>
-                <input
-                  id="admin-password-input"
-                  type="password"
-                  required
-                  disabled={isLoginLocked}
-                  autoComplete="current-password"
-                  value={passwordInput}
-                  onChange={(e) => setPasswordInput(e.target.value)}
-                  placeholder="Enter Admin Password"
-                  className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-stone-300 bg-stone-50 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white disabled:opacity-50"
-                />
-              </div>
-
-              {authError && !isLoginLocked && (
-                <p className="text-xs font-medium text-[#C83E2B] flex items-start gap-1.5">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{authError}</span>
-                </p>
-              )}
-
-              <button
-                type="submit"
-                disabled={isLoginLocked}
-                className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 disabled:bg-stone-300 disabled:text-stone-600 text-white text-sm font-semibold transition-colors tabular-nums"
-              >
-                {isLoginLocked
-                  ? `Locked (${formatCooldownTime(lockRemainingSeconds)})`
-                  : 'Sign In to Admin Panel'}
-              </button>
-
-              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200/80 text-[11px] text-stone-600 leading-relaxed">
                 <div>
-                  Sign in with your <span className="font-semibold text-stone-900">Admin ID</span> or{' '}
-                  <span className="font-semibold text-stone-900">Mobile Number</span> and Password.
-                </div>
-                <div className="mt-0.5 text-stone-500">
-                  Update credentials anytime inside &ldquo;Cafe &amp; WhatsApp&rdquo;.
+                  <h3 className="font-display text-xl font-bold text-stone-900">
+                    Admin Authentication
+                  </h3>
+                  <p className="text-xs text-stone-600 mt-0.5">
+                    Verified by Firebase Authentication, Custom Claims &amp; Server Security Rules. Zero passwords are stored in the app bundle.
+                  </p>
                 </div>
               </div>
-            </form>
+
+              {adminCloudEmail ? (
+                <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 space-y-3">
+                  <div className="text-xs text-emerald-950">
+                    <div className="font-bold flex items-center gap-1.5 text-[#15803D]">
+                      <Check className="w-4 h-4 shrink-0" />
+                      <span>Firebase Admin Session Verified</span>
+                    </div>
+                    <div className="mt-1 text-stone-700 break-all">
+                      Signed in as <span className="font-semibold">{adminCloudEmail}</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleFirebaseAdminSignIn();
+                    }}
+                    className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#15803D] hover:bg-[#166534] text-white text-sm font-semibold transition-colors"
+                  >
+                    Open Admin Panel
+                  </button>
+                  {onDisconnectAdminCloud && (
+                    <button
+                      type="button"
+                      onClick={onDisconnectAdminCloud}
+                      className="w-full min-h-[36px] px-3 py-1.5 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-xs font-semibold text-stone-700"
+                    >
+                      Sign Out / Switch Google Account
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <button
+                    type="button"
+                    disabled={connectingAdminCloud}
+                    onClick={() => {
+                      void handleFirebaseAdminSignIn();
+                    }}
+                    className="w-full min-h-[46px] px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 disabled:bg-stone-400 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Cloud className="w-4 h-4 shrink-0" />
+                    <span>
+                      {connectingAdminCloud
+                        ? 'Verifying with Firebase...'
+                        : 'Sign in with Firebase Admin (Google)'}
+                    </span>
+                  </button>
+
+                  {adminCloudError && (
+                    <p className="text-xs font-medium text-[#C83E2B] flex items-start gap-1.5">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{adminCloudError}</span>
+                    </p>
+                  )}
+
+                  <div className="p-3 rounded-xl bg-stone-50 border border-stone-200/80 text-[11px] text-stone-600 leading-relaxed">
+                    Sign in with the authorized Cafe Admin Google account. Firebase ID Token Custom Claims and Firestore Security Rules verify Admin permissions server-side.
+                  </div>
+                </div>
+              )}
+
+              {hasSavedOfflinePasscode && (
+                <div className="pt-3 border-t border-stone-200 space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowOfflinePasscodeForm((prev) => !prev);
+                      setAuthError('');
+                    }}
+                    className="text-xs font-semibold text-stone-600 hover:text-stone-900 underline underline-offset-2"
+                  >
+                    {showOfflinePasscodeForm
+                      ? 'Hide Offline Device Passcode'
+                      : 'Or unlock using saved Offline Device Passcode'}
+                  </button>
+
+                  {showOfflinePasscodeForm && (
+                    <form onSubmit={handleLogin} className="space-y-3">
+                      {isLoginLocked && (
+                        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-[#C83E2B] font-semibold flex items-center gap-2 tabular-nums">
+                          <Clock className="w-4 h-4 shrink-0" />
+                          <span>
+                            Login locked after failed attempts — retry in{' '}
+                            {formatCooldownTime(lockRemainingSeconds)}
+                          </span>
+                        </div>
+                      )}
+
+                      <div>
+                        <label
+                          htmlFor="admin-id-input"
+                          className="block text-xs font-semibold text-stone-700 mb-1"
+                        >
+                          Saved Admin ID or Mobile
+                        </label>
+                        <input
+                          id="admin-id-input"
+                          type="text"
+                          required
+                          disabled={isLoginLocked}
+                          autoComplete="username"
+                          value={adminIdInput}
+                          onChange={(e) => setAdminIdInput(e.target.value)}
+                          placeholder="Enter Admin ID or Mobile Number"
+                          className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-stone-300 bg-stone-50 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white disabled:opacity-50"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="admin-password-input"
+                          className="block text-xs font-semibold text-stone-700 mb-1"
+                        >
+                          Offline Passcode
+                        </label>
+                        <input
+                          id="admin-password-input"
+                          type="password"
+                          required
+                          disabled={isLoginLocked}
+                          autoComplete="current-password"
+                          value={passwordInput}
+                          onChange={(e) => setPasswordInput(e.target.value)}
+                          placeholder="Enter saved offline passcode"
+                          className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-stone-300 bg-stone-50 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white disabled:opacity-50"
+                        />
+                      </div>
+
+                      {authError && !isLoginLocked && (
+                        <p className="text-xs font-medium text-[#C83E2B] flex items-start gap-1.5">
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>{authError}</span>
+                        </p>
+                      )}
+
+                      <button
+                        type="submit"
+                        disabled={isLoginLocked}
+                        className="w-full min-h-[42px] px-4 py-2 rounded-xl border border-stone-300 bg-white hover:bg-stone-100 disabled:bg-stone-200 disabled:text-stone-500 text-stone-900 text-xs font-semibold transition-colors tabular-nums"
+                      >
+                        {isLoginLocked
+                          ? `Locked (${formatCooldownTime(lockRemainingSeconds)})`
+                          : 'Unlock Offline Mode'}
+                      </button>
+                    </form>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <>
@@ -1056,6 +1303,12 @@ export function AdminModal({
                   tableOrders={tableOrders}
                   referralRecords={referralRecords}
                   loyalty={loyalty}
+                  adminCloudEmail={adminCloudEmail}
+                  adminCloudError={adminCloudError}
+                  cloudOrdersCount={cloudOrdersCount}
+                  pendingSyncCount={pendingSyncCount}
+                  onConnectAdminCloud={onConnectAdminCloud}
+                  onDisconnectAdminCloud={onDisconnectAdminCloud}
                   onToggleHomeOrderFlag={(id) => {
                     onToggleHomeOrderFlag(id);
                     flashStatus('Updated Home Order flag status');
@@ -1064,6 +1317,46 @@ export function AdminModal({
                     onToggleTableOrderFlag(id);
                     flashStatus('Updated Table Order flag status');
                   }}
+                  onUpdateHomeOrderStatus={
+                    onUpdateHomeOrderStatus
+                      ? (id, status) => {
+                          onUpdateHomeOrderStatus(id, status);
+                          flashStatus(`Home order status updated to ${status}`);
+                        }
+                      : undefined
+                  }
+                  onUpdateTableOrderStatus={
+                    onUpdateTableOrderStatus
+                      ? (id, status) => {
+                          onUpdateTableOrderStatus(id, status);
+                          flashStatus(`Table order status updated to ${status}`);
+                        }
+                      : undefined
+                  }
+                  onVerifyHomeOrderPayment={
+                    onVerifyHomeOrderPayment
+                      ? (id, nextStatus) => {
+                          onVerifyHomeOrderPayment(id, nextStatus);
+                          flashStatus(
+                            nextStatus === 'paid'
+                              ? 'Home order payment verified as PAID'
+                              : 'Home order payment marked unpaid'
+                          );
+                        }
+                      : undefined
+                  }
+                  onVerifyTableOrderPayment={
+                    onVerifyTableOrderPayment
+                      ? (id, nextStatus) => {
+                          onVerifyTableOrderPayment(id, nextStatus);
+                          flashStatus(
+                            nextStatus === 'paid'
+                              ? 'Table order payment verified as PAID'
+                              : 'Table order payment marked unpaid'
+                          );
+                        }
+                      : undefined
+                  }
                   onDeleteHomeOrder={(id) => {
                     onDeleteHomeOrder(id);
                     flashStatus('Home order log deleted');
@@ -2071,11 +2364,10 @@ export function AdminModal({
 
                     <div>
                       <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Admin Login ID *
+                        Offline Backup Admin ID (Optional)
                       </label>
                       <input
                         type="text"
-                        required
                         value={settingsForm.adminId}
                         onChange={(e) =>
                           setSettingsForm({
@@ -2083,14 +2375,14 @@ export function AdminModal({
                             adminId: e.target.value,
                           })
                         }
-                        placeholder="@pizza"
+                        placeholder="Optional local device ID"
                         className="w-full min-h-[44px] px-3 rounded-xl border border-stone-200 bg-stone-50 text-sm focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
                       />
                     </div>
 
                     <div>
                       <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Admin Login Mobile Number
+                        Offline Backup Mobile Number (Optional)
                       </label>
                       <input
                         type="tel"
@@ -2101,18 +2393,18 @@ export function AdminModal({
                             adminMobile: e.target.value,
                           })
                         }
-                        placeholder="9651008080"
+                        placeholder="Optional 10-digit mobile"
                         className="w-full min-h-[44px] px-3 rounded-xl border border-stone-200 bg-stone-50 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
                       />
                     </div>
 
                     <div className="sm:col-span-2">
                       <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Admin Password *
+                        Offline Backup Device Passcode (Optional — Primary Login Uses Firebase Admin Auth)
                       </label>
                       <input
-                        type="text"
-                        required
+                        type="password"
+                        minLength={6}
                         value={settingsForm.adminPin}
                         onChange={(e) =>
                           setSettingsForm({
@@ -2120,7 +2412,7 @@ export function AdminModal({
                             adminPin: e.target.value,
                           })
                         }
-                        placeholder="Admin password"
+                        placeholder="Leave blank to enforce Firebase Admin Google Sign-In only"
                         className="w-full min-h-[44px] px-3 rounded-xl border border-stone-200 bg-stone-50 text-sm focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
                       />
                     </div>
@@ -2398,6 +2690,27 @@ export function AdminModal({
 
                       <div>
                         <label className="block text-xs font-semibold text-stone-700 mb-1">
+                          Points Discount Value (₹ Off)
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={settingsForm.pointsDiscountPerThreshold ?? 30}
+                          onChange={(e) =>
+                            setSettingsForm({
+                              ...settingsForm,
+                              pointsDiscountPerThreshold: Math.max(
+                                1,
+                                Math.round(Number(e.target.value) || 30)
+                              ),
+                            })
+                          }
+                          className="w-full min-h-[42px] px-3 rounded-xl border border-stone-200 bg-stone-50 text-sm font-semibold tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">
                           Reward Offer Label
                         </label>
                         <input
@@ -2414,6 +2727,66 @@ export function AdminModal({
                           }
                           className="w-full min-h-[42px] px-3 rounded-xl border border-stone-200 bg-stone-50 text-xs focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
                         />
+                      </div>
+                    </div>
+
+                    {/* Cafe UPI Payment Config */}
+                    <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-3">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-stone-900 uppercase tracking-wider">
+                        <Smartphone className="w-3.5 h-3.5 text-[#15803D]" />
+                        <span>Cafe UPI QR Payment Settings</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">
+                            Cafe UPI ID (optional)
+                          </label>
+                          <input
+                            type="text"
+                            value={settingsForm.upiId || ''}
+                            onChange={(e) =>
+                              setSettingsForm({
+                                ...settingsForm,
+                                upiId: e.target.value,
+                              })
+                            }
+                            placeholder="e.g. fourguyscafe@ybl or 9651008080@okicici"
+                            className="w-full min-h-[42px] px-3 rounded-xl border border-stone-200 bg-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#15803D]"
+                          />
+                          {settingsForm.upiId?.trim() ? (
+                            isValidUpiId(settingsForm.upiId) ? (
+                              <p className="text-[11px] font-semibold text-[#15803D] mt-1">
+                                Valid UPI ID — QR &amp; Pay App checkout active once saved
+                              </p>
+                            ) : (
+                              <p className="text-[11px] font-semibold text-[#C83E2B] mt-1">
+                                Enter a valid UPI handle like name@bank
+                              </p>
+                            )
+                          ) : (
+                            <p className="text-[11px] text-stone-500 mt-1">
+                              Leave empty to hide UPI payment option at checkout. Customer orders always verify manually in Admin.
+                            </p>
+                          )}
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">
+                            UPI Payee / Business Name
+                          </label>
+                          <input
+                            type="text"
+                            value={settingsForm.upiPayeeName || 'FOUR GUYS CAFE'}
+                            onChange={(e) =>
+                              setSettingsForm({
+                                ...settingsForm,
+                                upiPayeeName: e.target.value,
+                              })
+                            }
+                            placeholder="FOUR GUYS CAFE"
+                            className="w-full min-h-[42px] px-3 rounded-xl border border-stone-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#15803D]"
+                          />
+                        </div>
                       </div>
                     </div>
 
@@ -2689,13 +3062,177 @@ export function AdminModal({
                 </form>
               )}
 
+              {/* Table & Home Delivery QR Code Generator (Inside Settings Tab) */}
+              {activeTab === 'settings' && (
+                <div className="bg-white rounded-2xl border border-stone-200 p-5 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h3 className="font-display text-base font-bold text-stone-900 flex items-center gap-2">
+                        <QrCode className="w-4 h-4 text-[#C83E2B]" />
+                        <span>Table QR &amp; Home Delivery QR Generator</span>
+                      </h3>
+                      <p className="text-xs text-stone-600 mt-0.5">
+                        Print &amp; stick table tents or flyers. Scanning automatically opens your menu in the right table or Home Delivery mode.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {['Table 1', 'Table 2', 'Table 3', 'Table 4'].map((tbl) => (
+                      <button
+                        key={tbl}
+                        type="button"
+                        onClick={() => {
+                          setQrTargetMode('dine-in');
+                          setQrTableLabel(tbl);
+                        }}
+                        className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors ${
+                          qrTargetMode === 'dine-in' && qrTableLabel === tbl
+                            ? 'bg-stone-900 text-white border-stone-900'
+                            : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                        }`}
+                      >
+                        {tbl}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setQrTargetMode('home')}
+                      className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors ${
+                        qrTargetMode === 'home'
+                          ? 'bg-[#15803D] text-white border-[#15803D]'
+                          : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                      }`}
+                    >
+                      Home Delivery QR
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-center">
+                    <div className="sm:col-span-5 flex flex-col items-center justify-center p-4 rounded-2xl bg-stone-50 border border-stone-200">
+                      {qrPreviewDataUrl ? (
+                        <img
+                          src={qrPreviewDataUrl}
+                          alt={
+                            qrTargetMode === 'home'
+                              ? 'Home Delivery QR Code'
+                              : `QR Code for ${qrTableLabel || 'Dine-In'}`
+                          }
+                          className="w-44 h-44 rounded-xl border border-stone-200 bg-white p-1.5"
+                        />
+                      ) : (
+                        <div className="w-44 h-44 rounded-xl bg-white border border-stone-200 flex items-center justify-center text-xs text-stone-500">
+                          Generating QR...
+                        </div>
+                      )}
+                      <span className="mt-2 text-xs font-bold text-stone-900">
+                        {qrTargetMode === 'home'
+                          ? 'Home Delivery Mode'
+                          : qrTableLabel.trim() || 'Dine-In Menu'}
+                      </span>
+                    </div>
+
+                    <div className="sm:col-span-7 space-y-3">
+                      {qrTargetMode === 'dine-in' && (
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">
+                            Custom Table / Counter Name
+                          </label>
+                          <input
+                            type="text"
+                            value={qrTableLabel}
+                            onChange={(e) => setQrTableLabel(e.target.value)}
+                            placeholder="e.g. Table 5, Counter, Garden 2"
+                            className="w-full min-h-[42px] px-3 rounded-xl border border-stone-200 bg-stone-50 text-sm focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                          />
+                        </div>
+                      )}
+
+                      <div>
+                        <div className="text-[11px] font-semibold text-stone-500 mb-1">
+                          QR Destination URL
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200 font-mono text-[11px] text-stone-800 break-all">
+                          {generatedQrTargetUrl}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        {qrPreviewDataUrl && (
+                          <a
+                            href={qrPreviewDataUrl}
+                            download={`four-guys-cafe-${
+                              qrTargetMode === 'home'
+                                ? 'home-delivery'
+                                : (qrTableLabel.trim() || 'dine-in')
+                                    .toLowerCase()
+                                    .replace(/[^a-z0-9]+/g, '-')
+                            }-qr.png`}
+                            className="min-h-[40px] px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                          >
+                            <Download className="w-4 h-4" />
+                            <span>Download QR PNG</span>
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(generatedQrTargetUrl);
+                              setCopiedQrUrl(true);
+                              setTimeout(() => setCopiedQrUrl(false), 1800);
+                              flashStatus('Copied QR destination link');
+                            } catch {
+                              flashStatus('Copy failed — copy the URL box manually');
+                            }
+                          }}
+                          className="min-h-[40px] px-3.5 py-2 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold inline-flex items-center gap-1.5"
+                        >
+                          {copiedQrUrl ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-[#15803D]" />
+                              <span>Copied Link</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5" />
+                              <span>Copy QR Link</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* TAB 7: EXPORT / IMPORT JSON */}
-              {activeTab === 'json' && (
+              {activeTab === 'json' && (() => {
+                const storageReport = measureLocalStorageUsage();
+                return (
                 <div className="space-y-4">
                   <div className="bg-white rounded-2xl border border-stone-200 p-5 space-y-3">
-                    <h3 className="font-display text-base font-bold text-stone-900">
-                      Backup &amp; GitHub Pages Sync
-                    </h3>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <h3 className="font-display text-base font-bold text-stone-900">
+                        Backup &amp; GitHub Pages Sync
+                      </h3>
+                      <span
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold tabular-nums ${
+                          storageReport.isNearLimit
+                            ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                            : 'bg-stone-100 text-stone-700'
+                        }`}
+                      >
+                        Browser Storage: {storageReport.usagePercent}% used ({storageReport.usedKb} KB)
+                      </span>
+                    </div>
+
+                    {storageReport.warningMessage && (
+                      <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs font-semibold">
+                        {storageReport.warningMessage}
+                      </div>
+                    )}
+
                     <p className="text-xs text-stone-600 leading-relaxed">
                       Changes made here are saved immediately in this browser. To make your updated menu, prices, Home Order toggles, and WhatsApp number live for every visitor on GitHub Pages, export this JSON and update <span className="font-mono text-stone-800">src/data/defaultMenu.ts</span> in your repository, or import a saved JSON backup anytime.
                     </p>
@@ -2707,7 +3244,16 @@ export function AdminModal({
                         className="min-h-[44px] px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold inline-flex items-center gap-2"
                       >
                         <Download className="w-4 h-4" />
-                        <span>Download JSON Backup</span>
+                        <span>Download Menu JSON</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleDownloadFullBackup}
+                        className="min-h-[44px] px-4 py-2 rounded-xl bg-[#15803D] hover:bg-[#166534] text-white text-xs font-semibold inline-flex items-center gap-2"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>Download Safe Full Backup</span>
                       </button>
 
                       <button
@@ -2723,14 +3269,14 @@ export function AdminModal({
                         ) : (
                           <>
                             <Copy className="w-4 h-4" />
-                            <span>Copy JSON</span>
+                            <span>Copy Menu JSON</span>
                           </>
                         )}
                       </button>
 
                       <label className="min-h-[44px] px-4 py-2 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold inline-flex items-center gap-2 cursor-pointer">
                         <Upload className="w-4 h-4" />
-                        <span>Import .json File</span>
+                        <span>Import .json / Full Backup</span>
                         <input
                           type="file"
                           accept=".json,application/json"
@@ -2739,6 +3285,10 @@ export function AdminModal({
                         />
                       </label>
                     </div>
+
+                    <p className="text-[11px] text-stone-500 leading-relaxed">
+                      Security Note: Admin ID, Mobile, and Password/PIN — along with OTP codes and Firebase Auth sessions — are never included in exported Menu JSON or Full Backup files. Safe Full Backup covers Menu + Orders + Saved Customer Profiles + Referrals + Ratings + Vibe Snaps ({homeOrders.length + tableOrders.length} orders, {Object.keys(savedHomeProfiles).length} profiles, {ratings.length + vibeSnaps.length} community items).
+                    </p>
                   </div>
 
                   <div className="bg-white rounded-2xl border border-stone-200 p-5 space-y-3">
@@ -2769,7 +3319,8 @@ export function AdminModal({
                     </div>
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </div>
           </>
         )}

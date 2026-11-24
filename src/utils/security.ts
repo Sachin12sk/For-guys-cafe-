@@ -1,5 +1,6 @@
-import { ADMIN_LOCK_STORAGE_KEY } from '../data/defaultMenu';
 import type { CartItem } from '../types';
+
+const ADMIN_LOCK_STORAGE_KEY = 'four_guys_cafe_admin_lock_v1';
 
 export const MAX_FAILED_ADMIN_ATTEMPTS = 5;
 export const ADMIN_LOCKOUT_SECONDS = 60;

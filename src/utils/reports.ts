@@ -5,6 +5,11 @@ import type {
   ProductSalesStat,
   TableOrderRecord,
 } from '../types';
+import {
+  composeWardAreaLabel,
+  formatFullDeliveryAddress,
+  sanitizeGpsLocationUrl,
+} from './location';
 
 export interface SalesAnalyticsSummary {
   totalOrders: number;
@@ -132,14 +137,20 @@ export function downloadHomeOrdersCsv(homeOrders: HomeOrderRecord[]): void {
   const headers = [
     'Order ID',
     'Date & Time',
+    'Order Status',
     'Gmail',
     'Customer Name',
     'Alternate Phone',
     'Ward / Area',
+    'Full Delivery Address',
     'GPS Location Link',
     'Items Ordered',
+    'Points Discount (INR)',
     'Delivery Fee (INR)',
     'Total Amount (INR)',
+    'Payment Method',
+    'Payment Status',
+    'UPI Ref Note',
     'Referral Code Used',
     'Flagged / Review',
     'Customer Note',
@@ -157,17 +168,26 @@ export function downloadHomeOrdersCsv(homeOrders: HomeOrderRecord[]): void {
         return `${i.quantity}x ${i.name}${comboInfo} (Rs ${i.subtotal})`;
       })
       .join(' | ');
+    const wardAreaLabel = composeWardAreaLabel(order);
+    const fullAddress = formatFullDeliveryAddress(order);
+    const safeGeoUrl = sanitizeGpsLocationUrl(order.geoLocationUrl);
     rows.push([
       order.orderCode,
       formatOrderTimestamp(order.timestamp),
+      order.orderStatus || 'pending',
       order.gmail || '-',
       order.customerName,
       order.alternatePhone || '-',
-      order.wardArea || '-',
-      order.geoLocationUrl || '-',
+      wardAreaLabel || '-',
+      fullAddress || '-',
+      safeGeoUrl || '-',
       itemsText,
+      order.pointsDiscount ?? 0,
       order.deliveryFee ?? 0,
       order.totalAmount,
+      order.paymentMethod || 'cash',
+      order.paymentStatus || 'unpaid',
+      order.upiRefNote || '-',
       order.referralCodeUsed || '-',
       order.isFlagged ? order.flagReason || 'Flagged for Review' : 'Normal',
       order.customerNote || '-',
@@ -181,10 +201,15 @@ export function downloadTableOrdersCsv(tableOrders: TableOrderRecord[]): void {
   const headers = [
     'Order ID',
     'Date & Time',
+    'Order Status',
     'Table / Counter',
+    'Customer Phone',
     'Items Ordered',
+    'Points Discount (INR)',
     'Order Amount (INR)',
     'Full Session Bill (INR)',
+    'Payment Method',
+    'Payment Status',
     'Previously Sent Units',
     'Referral Code Used',
     'Flagged / Review',
@@ -206,10 +231,15 @@ export function downloadTableOrdersCsv(tableOrders: TableOrderRecord[]): void {
     rows.push([
       order.orderCode,
       formatOrderTimestamp(order.timestamp),
+      order.orderStatus || 'pending',
       order.tableNumber || 'Counter / QR Order',
+      order.customerPhone || '-',
       itemsText,
+      order.pointsDiscount ?? 0,
       order.newOrderAmount,
       order.sessionTotalAmount,
+      order.paymentMethod || 'cash',
+      order.paymentStatus || 'unpaid',
       order.previouslySentCount,
       order.referralCodeUsed || '-',
       order.isFlagged ? order.flagReason || 'Flagged for Review' : 'Normal',
@@ -333,7 +363,18 @@ export function downloadAdminPdfReport(
         : '';
       const deliveryPart =
         (order.deliveryFee ?? 0) > 0 ? ` (Del: Rs. ${order.deliveryFee})` : '';
-      const line = `${order.orderCode}${flagPart} | ${formatOrderTimestamp(order.timestamp)} | ${gmailPart}${order.customerName} (${order.alternatePhone || 'No alt phone'}) | ${order.wardArea || 'GPS Pin'} | Rs. ${order.totalAmount}${deliveryPart} | Items: ${itemsSummary}`;
+      const discountPart =
+        (order.pointsDiscount ?? 0) > 0 ? ` (Pts Off: Rs. ${order.pointsDiscount})` : '';
+      const payPart =
+        order.paymentStatus === 'paid'
+          ? ' [PAID]'
+          : order.paymentMethod === 'upi'
+          ? ' [UPI Pending]'
+          : ' [Cash]';
+      const fullAddress =
+        formatFullDeliveryAddress(order) ||
+        (sanitizeGpsLocationUrl(order.geoLocationUrl) ? 'GPS Pin' : 'Not provided');
+      const line = `${order.orderCode}${flagPart}${payPart} | ${formatOrderTimestamp(order.timestamp)} | ${gmailPart}${order.customerName} (${order.alternatePhone || 'No alt phone'}) | ${fullAddress} | Rs. ${order.totalAmount}${deliveryPart}${discountPart} | Items: ${itemsSummary}`;
       const wrapped = doc.splitTextToSize(line, maxLineWidth);
       ensureSpace(wrapped.length * 12 + 6);
       doc.text(wrapped, margin, y);
@@ -366,7 +407,14 @@ export function downloadAdminPdfReport(
       const flagPart = order.isFlagged
         ? ` [FLAGGED: ${order.flagReason || 'Verify Quantity'}]`
         : '';
-      const line = `${order.orderCode}${flagPart} | ${formatOrderTimestamp(order.timestamp)} | ${order.tableNumber || 'Counter'} | Order: Rs. ${order.newOrderAmount} (Session: Rs. ${order.sessionTotalAmount}) | Items: ${itemsSummary}`;
+      const phonePart = order.customerPhone ? ` | Mobile: ${order.customerPhone}` : '';
+      const payPart =
+        order.paymentStatus === 'paid'
+          ? ' [PAID]'
+          : order.paymentMethod === 'upi'
+          ? ' [UPI Pending]'
+          : ' [Cash]';
+      const line = `${order.orderCode}${flagPart}${payPart} | ${formatOrderTimestamp(order.timestamp)} | ${order.tableNumber || 'Counter'}${phonePart} | Order: Rs. ${order.newOrderAmount} (Session: Rs. ${order.sessionTotalAmount}) | Items: ${itemsSummary}`;
       const wrapped = doc.splitTextToSize(line, maxLineWidth);
       ensureSpace(wrapped.length * 12 + 6);
       doc.text(wrapped, margin, y);

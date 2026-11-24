@@ -1,8 +1,64 @@
+# Dependencies
 node_modules/
+
+# Production & build outputs
 build/
 dist/
+docs/
+dev-dist/
 coverage/
+*.tsbuildinfo
+
+# Logs & OS clutter
 .DS_Store
+Thumbs.db
 *.log
-.env*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+firebase-debug.log*
+firestore-debug.log*
+
+# Local environment files & secrets
+.env
+.env.*
 !.env.example
+
+# Firebase private credentials & local emulator cache (keep public client config firebase-applet-config.json)
+*serviceAccount*.json
+*service-account*.json
+firebase-adminsdk*.json
+*-firebase-adminsdk-*.json
+.firebase/
+.firebaserc.local
+
+# Android / Gradle / Capacitor build outputs & signing secrets (defense-in-depth with android/.gitignore)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore.properties
+android/.idea/
+android/captures/
+android/.cxx/
+android/.externalNativeBuild/
+android/capacitor-cordova-android-plugins/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/app/src/main/res/xml/config.xml
+*.apk
+*.aab
+*.ap_
+*.aar
+*.jks
+*.keystore
+*.p12
+*.pem
+keystore.properties
+
+# Ephemeral test, AI Studio metadata & workspace artifacts
+.aistudio/
+four-guys-cafe-sales-report.pdf
+workspace/

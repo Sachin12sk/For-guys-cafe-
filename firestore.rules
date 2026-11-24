@@ -1,0 +1,714 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Reusable Hardened Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 128 &&
+        id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Firebase Phone Authentication sets token.phone_number only after real SMS verification
+    function isVerifiedPhoneUser() {
+      return isSignedIn() &&
+        request.auth.token.phone_number is string &&
+        request.auth.token.phone_number.size() >= 8 &&
+        request.auth.token.phone_number.size() <= 20;
+    }
+
+    function isVerifiedEmailUser() {
+      return isSignedIn() &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (
+          request.auth.token.email == 'ashuofficial2093@gmail.com' &&
+          request.auth.token.email_verified == true
+        )
+      );
+    }
+
+    function isValidGpsUrl(url) {
+      return url is string &&
+        url.size() <= 250 &&
+        (
+          url == '' ||
+          url.matches('^https://maps\\.google\\.com/\\?q=-?[0-9]+\\.[0-9]+,-?[0-9]+\\.[0-9]+$')
+        );
+    }
+
+    // 3. Entity Validation Blueprints (Synchronized with firebase-blueprint.json)
+    function isValidCustomerProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'phoneNumber',
+          'customerName',
+          'gmail',
+          'wardArea',
+          'geoLocationUrl',
+          'customerNote',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'phoneNumber',
+          'customerName',
+          'gmail',
+          'ward',
+          'area',
+          'wardArea',
+          'deliveryAddress',
+          'geoLocationUrl',
+          'customerNote',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.uid is string &&
+        data.uid.size() >= 1 &&
+        data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == userId &&
+        data.phoneNumber is string &&
+        data.phoneNumber.size() >= 8 &&
+        data.phoneNumber.size() <= 20 &&
+        data.phoneNumber.matches('^\\+[1-9][0-9]{7,14}$') &&
+        data.customerName is string &&
+        data.customerName.size() <= 80 &&
+        data.gmail is string &&
+        data.gmail.size() <= 120 &&
+        (!('ward' in data) || (data.ward is string && data.ward.size() <= 60)) &&
+        (!('area' in data) || (data.area is string && data.area.size() <= 100)) &&
+        data.wardArea is string &&
+        data.wardArea.size() <= 120 &&
+        (!('deliveryAddress' in data) || (data.deliveryAddress is string && data.deliveryAddress.size() <= 250)) &&
+        isValidGpsUrl(data.geoLocationUrl) &&
+        data.customerNote is string &&
+        data.customerNote.size() <= 300 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOrderStatus(status) {
+      return status is string &&
+        status in ['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'completed', 'cancelled'];
+    }
+
+    function isValidPaymentMethod(method) {
+      return method is string && (method == 'cash' || method == 'upi');
+    }
+
+    function isValidPaymentStatus(status) {
+      return status is string &&
+        status in ['unpaid', 'pending_verification', 'paid'];
+    }
+
+    function isValidSourcePlatform(platform) {
+      return platform is string && (platform == 'web' || platform == 'android');
+    }
+
+    function isValidCustomerOrderSummary(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'orderCode',
+          'orderMode',
+          'itemsSummary',
+          'totalAmount',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'orderCode',
+          'orderMode',
+          'itemsSummary',
+          'totalAmount',
+          'pointsRedeemed',
+          'pointsDiscount',
+          'paymentMethod',
+          'paymentStatus',
+          'orderStatus',
+          'statusUpdatedAt',
+          'sourcePlatform',
+          'idempotencyKey',
+          'createdAt'
+        ]) &&
+        data.uid is string &&
+        data.uid.size() >= 1 &&
+        data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == userId &&
+        data.orderCode is string &&
+        data.orderCode.size() >= 3 &&
+        data.orderCode.size() <= 32 &&
+        data.orderCode.matches('^[A-Z0-9\\-]+$') &&
+        data.orderMode is string &&
+        (data.orderMode == 'dine-in' || data.orderMode == 'home') &&
+        data.itemsSummary is string &&
+        data.itemsSummary.size() >= 1 &&
+        data.itemsSummary.size() <= 1000 &&
+        (data.totalAmount is int || data.totalAmount is float) &&
+        data.totalAmount >= 0 &&
+        data.totalAmount <= 500000 &&
+        (!('pointsRedeemed' in data) || ((data.pointsRedeemed is int || data.pointsRedeemed is float) && data.pointsRedeemed >= 0 && data.pointsRedeemed <= 100000)) &&
+        (!('pointsDiscount' in data) || ((data.pointsDiscount is int || data.pointsDiscount is float) && data.pointsDiscount >= 0 && data.pointsDiscount <= 50000)) &&
+        (!('paymentMethod' in data) || isValidPaymentMethod(data.paymentMethod)) &&
+        (!('paymentStatus' in data) || isValidPaymentStatus(data.paymentStatus)) &&
+        (!('orderStatus' in data) || isValidOrderStatus(data.orderStatus)) &&
+        (!('statusUpdatedAt' in data) || data.statusUpdatedAt is timestamp) &&
+        (!('sourcePlatform' in data) || isValidSourcePlatform(data.sourcePlatform)) &&
+        (!('idempotencyKey' in data) || (data.idempotencyKey is string && data.idempotencyKey.size() >= 4 && data.idempotencyKey.size() <= 80 && data.idempotencyKey.matches('^[a-zA-Z0-9_\\-]+$'))) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCloudOrder(data) {
+      return data.keys().hasAll([
+          'customerUid',
+          'verifiedPhone',
+          'orderCode',
+          'orderMode',
+          'customerName',
+          'alternatePhone',
+          'gmail',
+          'wardArea',
+          'geoLocationUrl',
+          'tableNumber',
+          'customerNote',
+          'itemsSummary',
+          'itemsCount',
+          'deliveryFee',
+          'totalAmount',
+          'sessionTotalAmount',
+          'previouslySentCount',
+          'isFlagged',
+          'flagReason',
+          'referralCodeUsed',
+          'referralSpinsAwarded',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'customerUid',
+          'verifiedPhone',
+          'orderCode',
+          'orderMode',
+          'customerName',
+          'alternatePhone',
+          'gmail',
+          'ward',
+          'area',
+          'wardArea',
+          'deliveryAddress',
+          'geoLocationUrl',
+          'tableNumber',
+          'customerNote',
+          'itemsSummary',
+          'itemsCount',
+          'deliveryFee',
+          'pointsRedeemed',
+          'pointsDiscount',
+          'paymentMethod',
+          'paymentStatus',
+          'upiRefNote',
+          'paymentVerifiedAt',
+          'totalAmount',
+          'sessionTotalAmount',
+          'previouslySentCount',
+          'isFlagged',
+          'flagReason',
+          'referralCodeUsed',
+          'referralSpinsAwarded',
+          'orderStatus',
+          'statusUpdatedAt',
+          'sourcePlatform',
+          'idempotencyKey',
+          'createdAt'
+        ]) &&
+        data.customerUid is string &&
+        data.customerUid.size() >= 1 &&
+        data.customerUid.size() <= 128 &&
+        data.customerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.verifiedPhone is string &&
+        data.verifiedPhone.size() >= 8 &&
+        data.verifiedPhone.size() <= 20 &&
+        data.verifiedPhone.matches('^\\+[1-9][0-9]{7,14}$') &&
+        data.orderCode is string &&
+        data.orderCode.size() >= 3 &&
+        data.orderCode.size() <= 32 &&
+        data.orderCode.matches('^[A-Z0-9\\-]+$') &&
+        data.orderMode is string &&
+        (data.orderMode == 'dine-in' || data.orderMode == 'home') &&
+        data.customerName is string &&
+        data.customerName.size() <= 80 &&
+        data.alternatePhone is string &&
+        data.alternatePhone.size() <= 25 &&
+        data.gmail is string &&
+        data.gmail.size() <= 120 &&
+        (!('ward' in data) || (data.ward is string && data.ward.size() <= 60)) &&
+        (!('area' in data) || (data.area is string && data.area.size() <= 100)) &&
+        data.wardArea is string &&
+        data.wardArea.size() <= 120 &&
+        (!('deliveryAddress' in data) || (data.deliveryAddress is string && data.deliveryAddress.size() <= 250)) &&
+        isValidGpsUrl(data.geoLocationUrl) &&
+        data.tableNumber is string &&
+        data.tableNumber.size() <= 40 &&
+        data.customerNote is string &&
+        data.customerNote.size() <= 300 &&
+        data.itemsSummary is string &&
+        data.itemsSummary.size() >= 1 &&
+        data.itemsSummary.size() <= 1500 &&
+        (data.itemsCount is int || data.itemsCount is float) &&
+        data.itemsCount >= 1 &&
+        data.itemsCount <= 200 &&
+        (data.deliveryFee is int || data.deliveryFee is float) &&
+        data.deliveryFee >= 0 &&
+        data.deliveryFee <= 10000 &&
+        (!('pointsRedeemed' in data) || ((data.pointsRedeemed is int || data.pointsRedeemed is float) && data.pointsRedeemed >= 0 && data.pointsRedeemed <= 100000)) &&
+        (!('pointsDiscount' in data) || ((data.pointsDiscount is int || data.pointsDiscount is float) && data.pointsDiscount >= 0 && data.pointsDiscount <= 50000)) &&
+        (!('paymentMethod' in data) || isValidPaymentMethod(data.paymentMethod)) &&
+        (!('paymentStatus' in data) || isValidPaymentStatus(data.paymentStatus)) &&
+        (!('upiRefNote' in data) || (data.upiRefNote is string && data.upiRefNote.size() <= 80)) &&
+        (!('paymentVerifiedAt' in data) || data.paymentVerifiedAt is timestamp) &&
+        (data.totalAmount is int || data.totalAmount is float) &&
+        data.totalAmount >= 0 &&
+        data.totalAmount <= 500000 &&
+        (data.sessionTotalAmount is int || data.sessionTotalAmount is float) &&
+        data.sessionTotalAmount >= 0 &&
+        data.sessionTotalAmount <= 500000 &&
+        (data.previouslySentCount is int || data.previouslySentCount is float) &&
+        data.previouslySentCount >= 0 &&
+        data.previouslySentCount <= 500 &&
+        data.isFlagged is bool &&
+        data.flagReason is string &&
+        data.flagReason.size() <= 200 &&
+        data.referralCodeUsed is string &&
+        data.referralCodeUsed.size() <= 32 &&
+        (data.referralSpinsAwarded is int || data.referralSpinsAwarded is float) &&
+        data.referralSpinsAwarded >= 0 &&
+        data.referralSpinsAwarded <= 100 &&
+        (!('orderStatus' in data) || isValidOrderStatus(data.orderStatus)) &&
+        (!('statusUpdatedAt' in data) || data.statusUpdatedAt is timestamp) &&
+        (!('sourcePlatform' in data) || isValidSourcePlatform(data.sourcePlatform)) &&
+        (!('idempotencyKey' in data) || (data.idempotencyKey is string && data.idempotencyKey.size() >= 4 && data.idempotencyKey.size() <= 80 && data.idempotencyKey.matches('^[a-zA-Z0-9_\\-]+$'))) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidStoreCatalog(data) {
+      return data.keys().hasAll([
+          'schemaVersion',
+          'settings',
+          'categories',
+          'products',
+          'combos',
+          'updatedByEmail',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'schemaVersion',
+          'settings',
+          'categories',
+          'products',
+          'combos',
+          'updatedByEmail',
+          'updatedAt'
+        ]) &&
+        data.schemaVersion is string &&
+        data.schemaVersion.size() >= 3 &&
+        data.schemaVersion.size() <= 40 &&
+        data.settings is map &&
+        !('adminId' in data.settings) &&
+        !('adminMobile' in data.settings) &&
+        !('adminPin' in data.settings) &&
+        data.settings.cafeName is string &&
+        data.settings.cafeName.size() >= 1 &&
+        data.settings.cafeName.size() <= 80 &&
+        data.settings.isCafeOpen is bool &&
+        data.categories is list &&
+        data.categories.size() >= 1 &&
+        data.categories.size() <= 50 &&
+        data.products is list &&
+        data.products.size() <= 300 &&
+        data.combos is list &&
+        data.combos.size() <= 100 &&
+        data.updatedByEmail is string &&
+        data.updatedByEmail.size() >= 3 &&
+        data.updatedByEmail.size() <= 120 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReview(data, reviewId) {
+      return data.keys().hasAll([
+          'id',
+          'authorUid',
+          'authorName',
+          'stars',
+          'comment',
+          'orderMode',
+          'orderCode',
+          'sourcePlatform',
+          'isSample',
+          'isPublic',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'authorUid',
+          'authorName',
+          'stars',
+          'comment',
+          'orderMode',
+          'orderCode',
+          'sourcePlatform',
+          'isSample',
+          'isPublic',
+          'createdAt'
+        ]) &&
+        data.id is string &&
+        data.id == reviewId &&
+        data.authorUid is string &&
+        data.authorUid.size() >= 1 &&
+        data.authorUid.size() <= 128 &&
+        data.authorUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.authorName is string &&
+        data.authorName.size() >= 1 &&
+        data.authorName.size() <= 80 &&
+        (data.stars is int || data.stars is float) &&
+        data.stars >= 1 &&
+        data.stars <= 5 &&
+        data.comment is string &&
+        data.comment.size() <= 400 &&
+        data.orderMode is string &&
+        (data.orderMode == 'dine-in' || data.orderMode == 'home') &&
+        data.orderCode is string &&
+        data.orderCode.size() <= 32 &&
+        isValidSourcePlatform(data.sourcePlatform) &&
+        data.isSample is bool &&
+        data.isPublic is bool &&
+        data.isPublic == true &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidVibeSnap(data, snapId) {
+      return data.keys().hasAll([
+          'id',
+          'authorUid',
+          'authorName',
+          'stars',
+          'caption',
+          'overlayLabel',
+          'imageDataUrl',
+          'sourcePlatform',
+          'isPublic',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'authorUid',
+          'authorName',
+          'stars',
+          'caption',
+          'overlayLabel',
+          'imageDataUrl',
+          'sourcePlatform',
+          'isPublic',
+          'createdAt'
+        ]) &&
+        data.id is string &&
+        data.id == snapId &&
+        data.authorUid is string &&
+        data.authorUid.size() >= 1 &&
+        data.authorUid.size() <= 128 &&
+        data.authorUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.authorName is string &&
+        data.authorName.size() >= 1 &&
+        data.authorName.size() <= 80 &&
+        (data.stars is int || data.stars is float) &&
+        data.stars >= 1 &&
+        data.stars <= 5 &&
+        data.caption is string &&
+        data.caption.size() <= 180 &&
+        data.overlayLabel is string &&
+        data.overlayLabel.size() <= 80 &&
+        data.imageDataUrl is string &&
+        data.imageDataUrl.size() >= 30 &&
+        data.imageDataUrl.size() <= 300000 &&
+        data.imageDataUrl.matches('^data:image/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$') &&
+        isValidSourcePlatform(data.sourcePlatform) &&
+        data.isPublic is bool &&
+        data.isPublic == true &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidReferralEntry(data, referralId) {
+      return data.keys().hasAll([
+          'id',
+          'customerUid',
+          'orderCode',
+          'orderMode',
+          'referralCode',
+          'customerLabel',
+          'orderAmount',
+          'spinsAwarded',
+          'status',
+          'note',
+          'sourcePlatform',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'customerUid',
+          'orderCode',
+          'orderMode',
+          'referralCode',
+          'customerLabel',
+          'orderAmount',
+          'spinsAwarded',
+          'status',
+          'note',
+          'sourcePlatform',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.id is string &&
+        data.id == referralId &&
+        data.customerUid is string &&
+        data.customerUid.size() >= 1 &&
+        data.customerUid.size() <= 128 &&
+        data.customerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.orderCode is string &&
+        data.orderCode.size() >= 3 &&
+        data.orderCode.size() <= 32 &&
+        data.orderCode.matches('^[A-Z0-9\\-]+$') &&
+        data.orderMode is string &&
+        (data.orderMode == 'dine-in' || data.orderMode == 'home') &&
+        data.referralCode is string &&
+        data.referralCode.size() >= 4 &&
+        data.referralCode.size() <= 32 &&
+        data.referralCode.matches('^[A-Z0-9\\-]+$') &&
+        data.customerLabel is string &&
+        data.customerLabel.size() <= 100 &&
+        (data.orderAmount is int || data.orderAmount is float) &&
+        data.orderAmount >= 0 &&
+        data.orderAmount <= 500000 &&
+        (data.spinsAwarded is int || data.spinsAwarded is float) &&
+        data.spinsAwarded >= 0 &&
+        data.spinsAwarded <= 100 &&
+        data.status is string &&
+        data.status in ['credited', 'adjusted', 'revoked'] &&
+        data.note is string &&
+        data.note.size() <= 250 &&
+        isValidSourcePlatform(data.sourcePlatform) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Rules
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // Public live menu catalog (writable ONLY by verified Cafe Admin, never stores Admin PIN/ID/Mobile)
+    match /store/{docId} {
+      allow get: if isValidId(docId) && docId == 'catalog';
+      allow list: if false;
+      allow create, update: if isValidId(docId) &&
+        docId == 'catalog' &&
+        isAdmin() &&
+        isValidStoreCatalog(incoming()) &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Customer Reviews & Ratings (Public read, authenticated/verified create, Admin moderation delete)
+    match /reviews/{reviewId} {
+      allow get: if isValidId(reviewId) && (existing().isPublic == true || isAdmin());
+      allow list: if existing().isPublic == true || isAdmin();
+      allow create: if isValidId(reviewId) &&
+        (isAdmin() || isVerifiedPhoneUser()) &&
+        isValidReview(incoming(), reviewId) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(reviewId) && isAdmin();
+    }
+
+    // Cafe Vibe Wall Snaps (Public read, bounded base64 JPEG/PNG/WebP image, Admin moderation delete)
+    match /vibeSnaps/{snapId} {
+      allow get: if isValidId(snapId) && (existing().isPublic == true || isAdmin());
+      allow list: if existing().isPublic == true || isAdmin();
+      allow create: if isValidId(snapId) &&
+        (isAdmin() || isVerifiedPhoneUser()) &&
+        isValidVibeSnap(incoming(), snapId) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(snapId) && isAdmin();
+    }
+
+    // Order-Verified Referrals (Private to owner or Admin; immutable orderCode & customerUid)
+    match /referrals/{referralId} {
+      allow get: if isValidId(referralId) && (
+        isAdmin() ||
+        (isSignedIn() && existing().customerUid == request.auth.uid)
+      );
+      allow list: if isAdmin() || (isSignedIn() && existing().customerUid == request.auth.uid);
+      allow create: if isValidId(referralId) &&
+        isValidReferralEntry(incoming(), referralId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            isVerifiedPhoneUser() &&
+            incoming().customerUid == request.auth.uid &&
+            incoming().status == 'credited'
+          )
+        );
+      allow update: if isValidId(referralId) &&
+        isAdmin() &&
+        isValidReferralEntry(incoming(), referralId) &&
+        incoming().customerUid == existing().customerUid &&
+        incoming().orderCode == existing().orderCode &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(referralId) && isAdmin();
+    }
+
+    match /customers/{userId} {
+      // PII Isolation: Only profile owner or verified admin can read
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      // Query Enforcer: Prevent cross-user list scraping
+      allow list: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+
+      // Customer creates their own profile using their SMS-verified phone number
+      allow create: if isValidId(userId) &&
+        isOwner(userId) &&
+        isVerifiedPhoneUser() &&
+        isValidCustomerProfile(incoming(), userId) &&
+        incoming().keys().hasAll(['ward', 'area', 'deliveryAddress']) &&
+        incoming().uid == request.auth.uid &&
+        incoming().phoneNumber == request.auth.token.phone_number &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      // Action-Based Update: Profile details update with immutable uid, phoneNumber & createdAt
+      allow update: if isValidId(userId) &&
+        isValidCustomerProfile(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().phoneNumber == existing().phoneNumber &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            isOwner(userId) &&
+            isVerifiedPhoneUser() &&
+            incoming().phoneNumber == request.auth.token.phone_number &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'customerName',
+              'gmail',
+              'ward',
+              'area',
+              'wardArea',
+              'deliveryAddress',
+              'geoLocationUrl',
+              'customerNote',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
+
+      // Subcollection: Customer's Private Saved Order History
+      match /orders/{orderId} {
+        allow get: if isValidId(userId) && isValidId(orderId) && (isOwner(userId) || isAdmin());
+        allow list: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+
+        allow create: if isValidId(userId) &&
+          isValidId(orderId) &&
+          isOwner(userId) &&
+          (isVerifiedPhoneUser() || isVerifiedEmailUser()) &&
+          isValidCustomerOrderSummary(incoming(), userId) &&
+          incoming().uid == request.auth.uid &&
+          (!('paymentStatus' in incoming()) || incoming().paymentStatus in ['unpaid', 'pending_verification']) &&
+          incoming().createdAt == request.time &&
+          exists(/databases/$(database)/documents/customers/$(userId)) &&
+          get(/databases/$(database)/documents/customers/$(userId)).data.uid == request.auth.uid;
+
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(orderId) && (isOwner(userId) || isAdmin());
+      }
+    }
+
+    // Verified customer order feed for Cafe Admin (isolated per customer, readable by Admin)
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) && (
+        isAdmin() ||
+        (isSignedIn() && existing().customerUid == request.auth.uid)
+      );
+      allow list: if isAdmin() || (isSignedIn() && existing().customerUid == request.auth.uid);
+
+      allow create: if isValidId(orderId) &&
+        isVerifiedPhoneUser() &&
+        isValidCloudOrder(incoming()) &&
+        incoming().keys().hasAll(['ward', 'area', 'deliveryAddress']) &&
+        incoming().customerUid == request.auth.uid &&
+        incoming().verifiedPhone == request.auth.token.phone_number &&
+        (!('orderStatus' in incoming()) || incoming().orderStatus == 'pending') &&
+        (!('paymentStatus' in incoming()) || incoming().paymentStatus in ['unpaid', 'pending_verification']) &&
+        !('paymentVerifiedAt' in incoming()) &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/customers/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/customers/$(request.auth.uid)).data.uid == request.auth.uid;
+
+      allow update: if isValidId(orderId) &&
+        isAdmin() &&
+        isValidCloudOrder(incoming()) &&
+        incoming().customerUid == existing().customerUid &&
+        incoming().verifiedPhone == existing().verifiedPhone &&
+        incoming().orderCode == existing().orderCode &&
+        incoming().orderMode == existing().orderMode &&
+        (!('idempotencyKey' in existing()) || incoming().idempotencyKey == existing().idempotencyKey) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isFlagged', 'flagReason', 'orderStatus', 'statusUpdatedAt', 'paymentStatus', 'paymentVerifiedAt']) &&
+        (
+          !('statusUpdatedAt' in incoming().diff(existing()).affectedKeys()) ||
+          incoming().statusUpdatedAt == request.time
+        ) &&
+        (
+          !('paymentVerifiedAt' in incoming().diff(existing()).affectedKeys()) ||
+          incoming().paymentVerifiedAt == request.time
+        );
+
+      allow delete: if isValidId(orderId) && isAdmin();
+    }
+  }
+}

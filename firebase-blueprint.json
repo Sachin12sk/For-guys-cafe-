@@ -1,0 +1,708 @@
+{
+  "entities": {
+    "CustomerProfile": {
+      "title": "Customer Profile",
+      "description": "Private authenticated customer profile keyed by Firebase Auth UID with verified SMS phone number and saved delivery preferences.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "phoneNumber": {
+          "type": "string",
+          "description": "SMS-verified E.164 mobile number from Firebase Phone Authentication.",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^\\+[1-9][0-9]{7,14}$"
+        },
+        "customerName": {
+          "type": "string",
+          "description": "Customer display or delivery name.",
+          "minLength": 0,
+          "maxLength": 80
+        },
+        "gmail": {
+          "type": "string",
+          "description": "Optional customer Gmail address for home order autofill.",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "ward": {
+          "type": "string",
+          "description": "Customer Ward number or name.",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "area": {
+          "type": "string",
+          "description": "Customer Bilhaur locality or area.",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "wardArea": {
+          "type": "string",
+          "description": "Saved Bilhaur ward, landmark, or delivery area.",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "deliveryAddress": {
+          "type": "string",
+          "description": "Full street, house number, and landmark delivery address.",
+          "minLength": 0,
+          "maxLength": 250
+        },
+        "geoLocationUrl": {
+          "type": "string",
+          "description": "Optional consented Google Maps coordinate pin URL for home delivery.",
+          "minLength": 0,
+          "maxLength": 250,
+          "pattern": "^$|^https://maps\\.google\\.com/\\?q=-?[0-9]+\\.[0-9]+,-?[0-9]+\\.[0-9]+$"
+        },
+        "customerNote": {
+          "type": "string",
+          "description": "Optional default cooking or delivery instruction.",
+          "minLength": 0,
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated last update timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "phoneNumber",
+        "customerName",
+        "gmail",
+        "ward",
+        "area",
+        "wardArea",
+        "deliveryAddress",
+        "geoLocationUrl",
+        "customerNote",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomerOrderSummary": {
+      "title": "Customer Order Summary",
+      "description": "Verified order summary stored privately inside a signed-in customer's subcollection.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID matching parent customer document.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderCode": {
+          "type": "string",
+          "description": "Cafe order reference code (e.g., HOM-1001 or TBL-1001).",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "orderMode": {
+          "type": "string",
+          "enum": ["dine-in", "home"],
+          "description": "Order fulfillment channel."
+        },
+        "itemsSummary": {
+          "type": "string",
+          "description": "Compact summary of items ordered.",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "totalAmount": {
+          "type": "number",
+          "description": "Total order amount in INR."
+        },
+        "pointsRedeemed": {
+          "type": "number",
+          "description": "Loyalty points redeemed by the customer on this order."
+        },
+        "pointsDiscount": {
+          "type": "number",
+          "description": "Discount amount in INR credited from redeemed loyalty points."
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["cash", "upi"],
+          "description": "Selected payment method at checkout."
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["unpaid", "pending_verification", "paid"],
+          "description": "Payment state; customer submissions cannot self-verify as paid."
+        },
+        "orderStatus": {
+          "type": "string",
+          "enum": ["pending", "confirmed", "preparing", "ready", "delivered", "completed", "cancelled"],
+          "description": "Live fulfillment status synchronized between Admin and Customer."
+        },
+        "statusUpdatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the most recent status transition."
+        },
+        "sourcePlatform": {
+          "type": "string",
+          "enum": ["web", "android"],
+          "description": "Originating client platform sharing the same Firestore database."
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Deterministic submission key used to prevent duplicate orders across retries and devices."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated order timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "orderCode",
+        "orderMode",
+        "itemsSummary",
+        "totalAmount",
+        "createdAt"
+      ]
+    },
+    "CloudOrder": {
+      "title": "Verified Customer Cloud Order",
+      "description": "Order placed by an OTP-verified customer that syncs safely to the Cafe Admin Orders feed without exposing other customers' data.",
+      "type": "object",
+      "properties": {
+        "customerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "verifiedPhone": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^\\+[1-9][0-9]{7,14}$"
+        },
+        "orderCode": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "orderMode": {
+          "type": "string",
+          "enum": ["dine-in", "home"]
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 80
+        },
+        "alternatePhone": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 25
+        },
+        "gmail": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "ward": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "area": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "wardArea": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "deliveryAddress": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 250
+        },
+        "geoLocationUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 250,
+          "pattern": "^$|^https://maps\\.google\\.com/\\?q=-?[0-9]+\\.[0-9]+,-?[0-9]+\\.[0-9]+$"
+        },
+        "tableNumber": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "customerNote": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 300
+        },
+        "itemsSummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1500
+        },
+        "itemsCount": {
+          "type": "number"
+        },
+        "deliveryFee": {
+          "type": "number"
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "sessionTotalAmount": {
+          "type": "number"
+        },
+        "previouslySentCount": {
+          "type": "number"
+        },
+        "isFlagged": {
+          "type": "boolean"
+        },
+        "flagReason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 200
+        },
+        "referralCodeUsed": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 32
+        },
+        "referralSpinsAwarded": {
+          "type": "number"
+        },
+        "pointsRedeemed": {
+          "type": "number",
+          "description": "Loyalty points deducted when customer redeemed points at checkout."
+        },
+        "pointsDiscount": {
+          "type": "number",
+          "description": "Discount amount in INR applied for redeemed points."
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["cash", "upi"],
+          "description": "Payment mode selected at checkout (cash or upi)."
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["unpaid", "pending_verification", "paid"],
+          "description": "Honest payment confirmation state; only Cafe Admin can set paid."
+        },
+        "upiRefNote": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 80,
+          "description": "Optional customer-entered UPI UTR or transaction reference note."
+        },
+        "paymentVerifiedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp recorded when Cafe Admin verifies payment."
+        },
+        "orderStatus": {
+          "type": "string",
+          "enum": ["pending", "confirmed", "preparing", "ready", "delivered", "completed", "cancelled"],
+          "description": "Live order status managed by Admin and synced to Customer."
+        },
+        "statusUpdatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when Admin last updated orderStatus."
+        },
+        "sourcePlatform": {
+          "type": "string",
+          "enum": ["web", "android"],
+          "description": "Client platform that placed the order."
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Idempotency submission token blocking duplicate cloud order creation."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "customerUid",
+        "verifiedPhone",
+        "orderCode",
+        "orderMode",
+        "customerName",
+        "alternatePhone",
+        "gmail",
+        "ward",
+        "area",
+        "wardArea",
+        "deliveryAddress",
+        "geoLocationUrl",
+        "tableNumber",
+        "customerNote",
+        "itemsSummary",
+        "itemsCount",
+        "deliveryFee",
+        "totalAmount",
+        "sessionTotalAmount",
+        "previouslySentCount",
+        "isFlagged",
+        "flagReason",
+        "referralCodeUsed",
+        "referralSpinsAwarded",
+        "createdAt"
+      ]
+    },
+    "StoreCatalog": {
+      "title": "Live Cafe Store Catalog",
+      "description": "Publicly readable live menu, categories, products, combos, prices, and cafe open/closed status (strictly excluding admin credentials).",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40
+        },
+        "settings": {
+          "type": "object",
+          "description": "Sanitized cafe settings excluding adminId, adminMobile, and adminPin."
+        },
+        "categories": {
+          "type": "array"
+        },
+        "products": {
+          "type": "array"
+        },
+        "combos": {
+          "type": "array"
+        },
+        "updatedByEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "settings",
+        "categories",
+        "products",
+        "combos",
+        "updatedByEmail",
+        "updatedAt"
+      ]
+    },
+    "CustomerReview": {
+      "title": "Customer Review & Rating",
+      "description": "Verified customer rating & review displayed on the cafe review wall across devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "stars": {
+          "type": "number"
+        },
+        "comment": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 400
+        },
+        "orderMode": {
+          "type": "string",
+          "enum": ["dine-in", "home"]
+        },
+        "orderCode": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 32
+        },
+        "sourcePlatform": {
+          "type": "string",
+          "enum": ["web", "android"]
+        },
+        "isSample": {
+          "type": "boolean"
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "authorUid",
+        "authorName",
+        "stars",
+        "comment",
+        "orderMode",
+        "orderCode",
+        "sourcePlatform",
+        "isSample",
+        "isPublic",
+        "createdAt"
+      ]
+    },
+    "VibeSnap": {
+      "title": "Cafe Vibe Wall Snap",
+      "description": "Customer photo snap with FOUR GUYS overlay synced securely across devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "stars": {
+          "type": "number"
+        },
+        "caption": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 180
+        },
+        "overlayLabel": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 80
+        },
+        "imageDataUrl": {
+          "type": "string",
+          "minLength": 30,
+          "maxLength": 300000,
+          "pattern": "^data:image/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$"
+        },
+        "sourcePlatform": {
+          "type": "string",
+          "enum": ["web", "android"]
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "authorUid",
+        "authorName",
+        "stars",
+        "caption",
+        "overlayLabel",
+        "imageDataUrl",
+        "sourcePlatform",
+        "isPublic",
+        "createdAt"
+      ]
+    },
+    "ReferralEntry": {
+      "title": "Order-Verified Referral Entry",
+      "description": "Private referral verification ledger entry linked to a customer order and moderated by Admin.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderCode": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "orderMode": {
+          "type": "string",
+          "enum": ["dine-in", "home"]
+        },
+        "referralCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "customerLabel": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "orderAmount": {
+          "type": "number"
+        },
+        "spinsAwarded": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["credited", "adjusted", "revoked"]
+        },
+        "note": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 250
+        },
+        "sourcePlatform": {
+          "type": "string",
+          "enum": ["web", "android"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "customerUid",
+        "orderCode",
+        "orderMode",
+        "referralCode",
+        "customerLabel",
+        "orderAmount",
+        "spinsAwarded",
+        "status",
+        "note",
+        "sourcePlatform",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminRole": {
+      "title": "Admin Role Marker",
+      "description": "Server-provisioned admin role marker document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "required": ["uid"]
+    }
+  },
+  "firestore": {
+    "/customers/{userId}": {
+      "schema": {
+        "$ref": "#/entities/CustomerProfile"
+      },
+      "description": "Private customer profile documents keyed by Firebase Auth UID (PII isolated to owner or admin)."
+    },
+    "/customers/{userId}/orders/{orderId}": {
+      "schema": {
+        "$ref": "#/entities/CustomerOrderSummary"
+      },
+      "description": "Private order history subcollection owned by the customer and guarded by parent customer ownership."
+    },
+    "/orders/{orderId}": {
+      "schema": {
+        "$ref": "#/entities/CloudOrder"
+      },
+      "description": "OTP-verified customer orders readable by the owning customer or verified Cafe Admin."
+    },
+    "/store/{docId}": {
+      "schema": {
+        "$ref": "#/entities/StoreCatalog"
+      },
+      "description": "Publicly readable live menu, products, combos, prices, and cafe open/closed status writable only by verified Admin."
+    },
+    "/reviews/{reviewId}": {
+      "schema": {
+        "$ref": "#/entities/CustomerReview"
+      },
+      "description": "Customer reviews & ratings synced across devices; immutable once created and moderatable by Admin."
+    },
+    "/vibeSnaps/{snapId}": {
+      "schema": {
+        "$ref": "#/entities/VibeSnap"
+      },
+      "description": "Cafe Vibe Wall branded photo snaps synced across devices; bounded size and moderatable by Admin."
+    },
+    "/referrals/{referralId}": {
+      "schema": {
+        "$ref": "#/entities/ReferralEntry"
+      },
+      "description": "Order-verified referral records private to owning customer or verified Admin."
+    },
+    "/admins/{adminId}": {
+      "schema": {
+        "$ref": "#/entities/AdminRole"
+      },
+      "description": "Read-only admin membership markers managed strictly out-of-band."
+    }
+  }
+}

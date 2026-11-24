@@ -2,6 +2,10 @@ import { createRoot } from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
 import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+import {
+  initNativeAndroidShell,
+  isCapacitorNative,
+} from './utils/nativeAndroid.ts';
 import './index.css';
 
 declare global {
@@ -11,7 +15,11 @@ declare global {
   }
 }
 
-if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+if (
+  typeof window !== 'undefined' &&
+  'serviceWorker' in navigator &&
+  !isCapacitorNative()
+) {
   try {
     registerSW({
       immediate: true,
@@ -33,6 +41,7 @@ if (rootElement) {
       </ErrorBoundary>
     );
     window.__FOUR_GUYS_MOUNTED__ = true;
+    void initNativeAndroidShell();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('FOUR GUYS CAFE failed to mount:', err);

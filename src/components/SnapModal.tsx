@@ -18,12 +18,18 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import type { VibeSnapRecord } from '../types';
+import {
+  captureWithNativeCamera,
+  ensureNativeCameraPermission,
+  isCapacitorNative,
+} from '../utils/nativeAndroid';
 
 interface SnapModalProps {
   isOpen: boolean;
   onClose: () => void;
   cafeName: string;
   onPublishSnap: (snap: VibeSnapRecord) => void;
+  storageWarning?: string | null;
 }
 
 interface PromoOverlayPreset {
@@ -70,6 +76,7 @@ export function SnapModal({
   onClose,
   cafeName,
   onPublishSnap,
+  storageWarning,
 }: SnapModalProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -102,6 +109,17 @@ export function SnapModal({
     async (mode: 'user' | 'environment') => {
       stopCamera();
       setCameraError('');
+
+      if (isCapacitorNative()) {
+        const perm = await ensureNativeCameraPermission();
+        if (!perm.granted) {
+          setCameraError(
+            perm.message ||
+              'Camera permission अस्वीकृत है — नीचे से फोटो चुनें या App Settings में Camera अनुमति दें।'
+          );
+          return;
+        }
+      }
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setCameraError(
@@ -217,7 +235,12 @@ export function SnapModal({
         : `${starString}  Spotted at ${cafeName}`;
       ctx.fillText(footerLine, 28, height - 28);
 
-      setComposedDataUrl(canvas.toDataURL('image/jpeg', 0.78));
+      let dataUrl = canvas.toDataURL('image/jpeg', 0.74);
+      for (const q of [0.6, 0.46, 0.35]) {
+        if (dataUrl.length <= 220_000) break;
+        dataUrl = canvas.toDataURL('image/jpeg', q);
+      }
+      setComposedDataUrl(dataUrl);
     };
     img.src = rawImageSrc;
   }, [rawImageSrc, selectedOverlayId, caption, stars, cafeName]);
@@ -254,6 +277,17 @@ export function SnapModal({
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const handleNativeCameraShot = async () => {
+    const res = await captureWithNativeCamera();
+    if (res.ok && res.dataUrl) {
+      setCameraError('');
+      setRawImageSrc(res.dataUrl);
+      stopCamera();
+    } else if (!res.cancelled && res.message) {
+      setCameraError(res.message);
+    }
   };
 
   const handleRetake = () => {
@@ -334,6 +368,13 @@ export function SnapModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {storageWarning && (
+            <div className="p-3 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 text-xs font-semibold flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-800" />
+              <span>{storageWarning}</span>
+            </div>
+          )}
+
           {publishedBanner && (
             <div className="p-3 rounded-2xl bg-[#15803D] text-white text-xs font-semibold flex items-center gap-2">
               <Check className="w-4 h-4 shrink-0" />
@@ -399,6 +440,17 @@ export function SnapModal({
                   <span>Flip</span>
                 </button>
               </div>
+
+              {isCapacitorNative() && (
+                <button
+                  type="button"
+                  onClick={() => void handleNativeCameraShot()}
+                  className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center justify-center gap-2"
+                >
+                  <Camera className="w-4 h-4 text-amber-400" />
+                  <span>Open Android Camera</span>
+                </button>
+              )}
 
               <label className="w-full min-h-[44px] px-4 py-2.5 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer">
                 <Upload className="w-4 h-4 text-[#C83E2B]" />

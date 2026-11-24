@@ -4,14 +4,29 @@ import type {
   HomeOrderDetails,
   HomeOrderRecord,
   LoyaltyState,
+  PaymentMethod,
   TableOrderRecord,
 } from '../types';
 import { detectHighQuantityItems } from './security';
 import { formatOrderTimestamp } from './reports';
+import {
+  composeWardAreaLabel,
+  formatFullDeliveryAddress,
+  sanitizeGpsLocationUrl,
+} from './location';
+import { isValidUpiId, normalizeUpiId } from './upi';
 
 export interface WhatsappLoyaltyInfo {
   points: number;
   estimatedEarned: number;
+}
+
+export interface CheckoutExtrasOptions {
+  pointsRedeemed?: number;
+  pointsDiscount?: number;
+  paymentMethod?: PaymentMethod;
+  upiRefNote?: string;
+  customerPhone?: string;
 }
 
 export function sanitizeWhatsappNumber(raw: string): string {
@@ -48,7 +63,8 @@ function appendLoyaltyLines(
   lines: string[],
   settings: CafeSettings,
   orderAmount: number,
-  loyalty?: LoyaltyState
+  loyalty?: LoyaltyState,
+  redemption?: { pointsRedeemed: number; pointsDiscount: number }
 ): void {
   if (settings.loyaltyEnabled === false) return;
   const earned = computeOrderPointsEstimate(orderAmount, settings);
@@ -56,8 +72,9 @@ function appendLoyaltyLines(
   const rewardLabel =
     settings.rewardLabel?.trim() || 'Free Cold Drink or ₹30 Off';
 
+  const redeemedPts = Math.max(0, redemption?.pointsRedeemed || 0);
   const currentPoints = loyalty?.points ?? 0;
-  const nextBalance = currentPoints + earned;
+  const nextBalance = Math.max(0, currentPoints - redeemedPts + earned);
   const ordersCompleted = loyalty?.ordersCompleted ?? 0;
   const spinsBonus =
     ordersCompleted === 0
@@ -80,6 +97,11 @@ function appendLoyaltyLines(
       ? '100-Pt High Tier UNLOCKED'
       : `Spend ₹${highTierSpend - nextSpend} more for 100-Pt Tier`;
 
+  if (redeemedPts > 0 && (redemption?.pointsDiscount || 0) > 0) {
+    lines.push(
+      `Points Redeemed: -${redeemedPts} pts (₹${redemption?.pointsDiscount} Discount Applied)`
+    );
+  }
   lines.push(
     `Cafe Points: +${earned} pts on this order (Balance: ${nextBalance}/${threshold} pts)`
   );
@@ -103,7 +125,8 @@ export function buildWhatsappOrderText(
   items: CartItem[],
   tableNumber: string,
   customerNote: string,
-  loyalty?: LoyaltyState
+  loyalty?: LoyaltyState,
+  extras?: CheckoutExtrasOptions
 ): string {
   const newItems = items.filter((item) => !item.isSent);
   const sentItems = items.filter((item) => item.isSent);
@@ -118,6 +141,10 @@ export function buildWhatsappOrderText(
   );
   const grandTotal = newSubtotal + sentSubtotal;
 
+  const discount = Math.max(0, Math.min(grandTotal, extras?.pointsDiscount || 0));
+  const redeemedPts = discount > 0 ? Math.max(0, extras?.pointsRedeemed || 0) : 0;
+  const netSessionPayable = Math.max(0, grandTotal - discount);
+
   const threshold = Math.max(1, Number(settings.highQuantityThreshold) || 10);
   const itemsToCheck = newItems.length > 0 ? newItems : items;
   const highQty = detectHighQuantityItems(itemsToCheck, threshold);
@@ -127,8 +154,12 @@ export function buildWhatsappOrderText(
     tableNumber.trim()
       ? `Table / Type: ${tableNumber.trim()}`
       : 'Table / Type: Counter / QR Order',
-    '------------------------',
   ];
+
+  if (extras?.customerPhone?.trim()) {
+    lines.push(`Customer Mobile (Receipt): ${extras.customerPhone.trim()}`);
+  }
+  lines.push('------------------------');
 
   let lineIndex = 1;
 
@@ -178,14 +209,32 @@ export function buildWhatsappOrderText(
     lines.push(`Already Sent Earlier: ₹${sentSubtotal}`);
   }
 
-  lines.push(`*FULL SESSION BILL TOTAL: ₹${grandTotal}*`);
+  if (discount > 0) {
+    lines.push(`Points Discount (${redeemedPts} pts): -₹${discount}`);
+    lines.push(`*NET PAYABLE SESSION BILL: ₹${netSessionPayable}*`);
+  } else {
+    lines.push(`*FULL SESSION BILL TOTAL: ₹${grandTotal}*`);
+  }
 
-  appendLoyaltyLines(
-    lines,
-    settings,
-    newSubtotal > 0 ? newSubtotal : grandTotal,
-    loyalty
+  if (extras?.paymentMethod === 'upi' && isValidUpiId(settings.upiId)) {
+    lines.push(
+      `Payment Method: UPI QR (${normalizeUpiId(settings.upiId)}) — Status: Pending Admin Verification`
+    );
+    if (extras.upiRefNote?.trim()) {
+      lines.push(`UPI Ref / UTR: ${extras.upiRefNote.trim()}`);
+    }
+  } else if (extras?.paymentMethod === 'cash') {
+    lines.push('Payment Method: Cash / Pay at Counter');
+  }
+
+  const earnableBase = Math.max(
+    0,
+    (newSubtotal > 0 ? newSubtotal : grandTotal) - discount
   );
+  appendLoyaltyLines(lines, settings, earnableBase, loyalty, {
+    pointsRedeemed: redeemedPts,
+    pointsDiscount: discount,
+  });
 
   if (highQty.isFlagged) {
     lines.push(
@@ -210,7 +259,8 @@ export function buildWhatsappOrderUrl(
   items: CartItem[],
   tableNumber: string,
   customerNote: string,
-  loyalty?: LoyaltyState
+  loyalty?: LoyaltyState,
+  extras?: CheckoutExtrasOptions
 ): string {
   const phone = sanitizeWhatsappNumber(settings.whatsappNumber);
   const text = buildWhatsappOrderText(
@@ -218,7 +268,8 @@ export function buildWhatsappOrderUrl(
     items,
     tableNumber,
     customerNote,
-    loyalty
+    loyalty,
+    extras
   );
   return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
 }
@@ -227,18 +278,29 @@ export function buildHomeOrderWhatsappText(
   settings: CafeSettings,
   items: CartItem[],
   details: HomeOrderDetails,
-  loyalty?: LoyaltyState
+  loyalty?: LoyaltyState,
+  extras?: CheckoutExtrasOptions
 ): string {
   const activeItems = items.filter((item) => item.selected !== false);
   const itemsSubtotal = activeItems.reduce(
     (sum, item) => sum + item.product.price * item.quantity,
     0
   );
+  const discount = Math.max(0, Math.min(itemsSubtotal, extras?.pointsDiscount || 0));
+  const redeemedPts = discount > 0 ? Math.max(0, extras?.pointsRedeemed || 0) : 0;
   const deliveryFee = Math.max(0, Number(settings.homeDeliveryFee ?? 0));
-  const grandTotal = itemsSubtotal + deliveryFee;
+  const grandTotal = Math.max(0, itemsSubtotal - discount) + deliveryFee;
 
   const threshold = Math.max(1, Number(settings.highQuantityThreshold) || 10);
   const highQty = detectHighQuantityItems(activeItems, threshold);
+
+  const safeGeoUrl = sanitizeGpsLocationUrl(details.geoLocationUrl);
+  const wardAreaLabel = composeWardAreaLabel({
+    ward: details.ward,
+    area: details.area,
+    wardArea: details.wardArea,
+  });
+  const deliveryAddr = (details.deliveryAddress || '').trim();
 
   const lines: string[] = [
     `*HOME ORDER — ${settings.cafeName}*`,
@@ -248,13 +310,19 @@ export function buildHomeOrderWhatsappText(
     details.alternatePhone.trim()
       ? `Mobile / Alt Phone: ${details.alternatePhone.trim()}`
       : 'Mobile / Alt Phone: Not provided',
-    details.wardArea.trim()
-      ? `Ward / Area: ${details.wardArea.trim()}`
-      : 'Ward / Area: Via GPS Pin',
+    wardAreaLabel
+      ? `Area / Ward: ${wardAreaLabel}`
+      : safeGeoUrl
+      ? 'Area / Ward: Via GPS Pin'
+      : 'Area / Ward: Not specified',
   ];
 
-  if (details.geoLocationUrl.trim()) {
-    lines.push(`GPS Location: ${details.geoLocationUrl.trim()}`);
+  if (deliveryAddr) {
+    lines.push(`Delivery Address: ${deliveryAddr}`);
+  }
+
+  if (safeGeoUrl) {
+    lines.push(`GPS Location (Consented): ${safeGeoUrl}`);
   }
 
   lines.push('------------------------');
@@ -276,12 +344,35 @@ export function buildHomeOrderWhatsappText(
 
   lines.push('------------------------');
   lines.push(`Items Subtotal: ₹${itemsSubtotal}`);
+  if (discount > 0) {
+    lines.push(`Points Discount (${redeemedPts} pts): -₹${discount}`);
+  }
   lines.push(
     deliveryFee === 0 ? 'Delivery Fee: FREE (₹0)' : `Delivery Fee: ₹${deliveryFee}`
   );
   lines.push(`*HOME ORDER TOTAL: ₹${grandTotal}*`);
 
-  appendLoyaltyLines(lines, settings, itemsSubtotal, loyalty);
+  if (extras?.paymentMethod === 'upi' && isValidUpiId(settings.upiId)) {
+    lines.push(
+      `Payment Method: UPI QR (${normalizeUpiId(settings.upiId)}) — Status: Pending Admin Verification`
+    );
+    if (extras.upiRefNote?.trim()) {
+      lines.push(`UPI Ref / UTR: ${extras.upiRefNote.trim()}`);
+    }
+  } else if (extras?.paymentMethod === 'cash') {
+    lines.push('Payment Method: Cash on Delivery');
+  }
+
+  appendLoyaltyLines(
+    lines,
+    settings,
+    Math.max(0, itemsSubtotal - discount),
+    loyalty,
+    {
+      pointsRedeemed: redeemedPts,
+      pointsDiscount: discount,
+    }
+  );
 
   if (highQty.isFlagged) {
     lines.push(
@@ -308,16 +399,34 @@ export function buildHomeOrderWhatsappUrl(
   settings: CafeSettings,
   items: CartItem[],
   details: HomeOrderDetails,
-  loyalty?: LoyaltyState
+  loyalty?: LoyaltyState,
+  extras?: CheckoutExtrasOptions
 ): string {
   const phone = getEffectiveHomeWhatsappNumber(settings);
   const text = buildHomeOrderWhatsappText(
     settings,
     items,
     details,
-    loyalty
+    loyalty,
+    extras
   );
   return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
+}
+
+function formatHonestPaymentStatusLine(
+  paymentMethod?: PaymentMethod,
+  paymentStatus?: 'unpaid' | 'pending_verification' | 'paid',
+  upiRefNote?: string
+): string {
+  if (paymentStatus === 'paid') {
+    return paymentMethod === 'upi'
+      ? `Payment: PAID via UPI (Verified by Cafe${upiRefNote ? ` · UTR: ${upiRefNote}` : ''})`
+      : 'Payment: PAID (Confirmed by Cafe)';
+  }
+  if (paymentMethod === 'upi') {
+    return `Payment: UPI QR — Pending Verification${upiRefNote ? ` (UTR: ${upiRefNote})` : ''}`;
+  }
+  return 'Payment: Cash / Pay on Order';
 }
 
 export function buildHomeReceiptText(
@@ -325,7 +434,11 @@ export function buildHomeReceiptText(
   order: HomeOrderRecord
 ): string {
   const deliveryFee = Math.max(0, Number(order.deliveryFee ?? 0));
-  const itemsSubtotal = Math.max(0, order.totalAmount - deliveryFee);
+  const pointsDiscount = Math.max(0, Number(order.pointsDiscount ?? 0));
+  const itemsSubtotal = Math.max(0, order.totalAmount - deliveryFee + pointsDiscount);
+
+  const fullAddress = formatFullDeliveryAddress(order);
+  const safeGeoUrl = sanitizeGpsLocationUrl(order.geoLocationUrl);
 
   const lines: string[] = [
     `*DIGITAL RECEIPT — ${settings.cafeName}*`,
@@ -336,7 +449,7 @@ export function buildHomeReceiptText(
     `Date & Time: ${formatOrderTimestamp(order.timestamp)}`,
     `Customer: ${order.customerName}`,
     `Mobile: ${order.alternatePhone || 'Not provided'}`,
-    `Address: ${order.wardArea || 'Via GPS Pin'}`,
+    `Address: ${fullAddress || (safeGeoUrl ? 'Via GPS Pin' : 'Not provided')}`,
     '------------------------',
     '*ITEMS:*',
   ];
@@ -353,10 +466,22 @@ export function buildHomeReceiptText(
 
   lines.push('------------------------');
   lines.push(`Items Subtotal: ₹${itemsSubtotal}`);
+  if (pointsDiscount > 0) {
+    lines.push(
+      `Points Discount (${order.pointsRedeemed || 0} pts): -₹${pointsDiscount}`
+    );
+  }
   lines.push(
     deliveryFee === 0 ? 'Delivery Fee: FREE (₹0)' : `Delivery Fee: ₹${deliveryFee}`
   );
-  lines.push(`*TOTAL PAID / DUE: ₹${order.totalAmount}*`);
+  lines.push(`*TOTAL PAYABLE / DUE: ₹${order.totalAmount}*`);
+  lines.push(
+    formatHonestPaymentStatusLine(
+      order.paymentMethod,
+      order.paymentStatus,
+      order.upiRefNote
+    )
+  );
 
   if (order.customerNote) {
     lines.push(`Note: ${order.customerNote}`);
@@ -385,6 +510,7 @@ export function buildTableReceiptText(
   settings: CafeSettings,
   order: TableOrderRecord
 ): string {
+  const pointsDiscount = Math.max(0, Number(order.pointsDiscount ?? 0));
   const lines: string[] = [
     `*DIGITAL RECEIPT — ${settings.cafeName}*`,
     `${settings.tagline}`,
@@ -392,9 +518,14 @@ export function buildTableReceiptText(
     `Order ID: *${order.orderCode}*`,
     `Order Type: Dine-In (${order.tableNumber || 'Counter / QR'})`,
     `Date & Time: ${formatOrderTimestamp(order.timestamp)}`,
-    '------------------------',
-    '*ITEMS:*',
   ];
+
+  if (order.customerPhone?.trim()) {
+    lines.push(`Customer Mobile: ${order.customerPhone.trim()}`);
+  }
+
+  lines.push('------------------------');
+  lines.push('*ITEMS:*');
 
   order.items.forEach((item, idx) => {
     const comboTag = item.isCombo ? ' [COMBO]' : '';
@@ -407,11 +538,23 @@ export function buildTableReceiptText(
   });
 
   lines.push('------------------------');
-  lines.push(`This Batch Subtotal: ₹${order.newOrderAmount}`);
+  lines.push(`This Batch Payable: ₹${order.newOrderAmount}`);
+  if (pointsDiscount > 0) {
+    lines.push(
+      `Points Discount (${order.pointsRedeemed || 0} pts): -₹${pointsDiscount}`
+    );
+  }
   if (order.sessionTotalAmount > order.newOrderAmount) {
     lines.push(`Full Table Session Total: ₹${order.sessionTotalAmount}`);
   }
   lines.push(`*BILL TOTAL: ₹${order.sessionTotalAmount}*`);
+  lines.push(
+    formatHonestPaymentStatusLine(
+      order.paymentMethod,
+      order.paymentStatus,
+      order.upiRefNote
+    )
+  );
 
   if (order.customerNote) {
     lines.push(`Note: ${order.customerNote}`);
@@ -428,5 +571,10 @@ export function buildTableReceiptWhatsappUrl(
   order: TableOrderRecord
 ): string {
   const text = buildTableReceiptText(settings, order);
+  const rawDigits = (order.customerPhone || '').replace(/\D/g, '');
+  if (rawDigits.length >= 10) {
+    const phone = sanitizeWhatsappNumber(order.customerPhone || '');
+    return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
+  }
   return `https://wa.me/?text=${encodeURIComponent(text)}`;
 }

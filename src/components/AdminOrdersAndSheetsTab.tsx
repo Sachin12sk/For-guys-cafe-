@@ -15,15 +15,28 @@ import {
   Minus,
   RotateCcw,
   MessageCircle,
+  Cloud,
+  Search,
 } from 'lucide-react';
 import type {
   CafeSettings,
   HomeOrderRecord,
   LoyaltyState,
   OrderMode,
+  OrderStatus,
+  PaymentStatus,
   ReferralRecord,
   TableOrderRecord,
 } from '../types';
+import {
+  ORDER_STATUS_META,
+  ORDER_STATUS_OPTIONS,
+} from '../services/cloudSync';
+import {
+  filterOrdersByCriteria,
+  type OrderDateFilter,
+  type OrderStatusFilter,
+} from '../utils/orderFilters';
 import {
   computeSalesAnalytics,
   downloadAdminPdfReport,
@@ -35,6 +48,11 @@ import {
   buildHomeReceiptWhatsappUrl,
   buildTableReceiptWhatsappUrl,
 } from '../utils/whatsapp';
+import {
+  composeWardAreaLabel,
+  isValidGpsMapsUrl,
+  sanitizeGpsLocationUrl,
+} from '../utils/location';
 
 interface AdminOrdersAndSheetsTabProps {
   settings: CafeSettings;
@@ -44,6 +62,10 @@ interface AdminOrdersAndSheetsTabProps {
   loyalty: LoyaltyState;
   onToggleHomeOrderFlag: (id: string) => void;
   onToggleTableOrderFlag: (id: string) => void;
+  onUpdateHomeOrderStatus?: (id: string, status: OrderStatus) => void;
+  onUpdateTableOrderStatus?: (id: string, status: OrderStatus) => void;
+  onVerifyHomeOrderPayment?: (id: string, nextStatus: PaymentStatus) => void;
+  onVerifyTableOrderPayment?: (id: string, nextStatus: PaymentStatus) => void;
   onDeleteHomeOrder: (id: string) => void;
   onDeleteTableOrder: (id: string) => void;
   onClearAllOrders: () => void;
@@ -61,6 +83,12 @@ interface AdminOrdersAndSheetsTabProps {
   onToggleRevokeReferral: (id: string) => void;
   onDeleteReferralRecord: (id: string) => void;
   onAdjustBrowserSpins: (deltaSpins: number) => void;
+  adminCloudEmail?: string | null;
+  adminCloudError?: string | null;
+  cloudOrdersCount?: number;
+  pendingSyncCount?: number;
+  onConnectAdminCloud?: () => void;
+  onDisconnectAdminCloud?: () => void;
 }
 
 export function AdminOrdersAndSheetsTab({
@@ -71,6 +99,10 @@ export function AdminOrdersAndSheetsTab({
   loyalty,
   onToggleHomeOrderFlag,
   onToggleTableOrderFlag,
+  onUpdateHomeOrderStatus,
+  onUpdateTableOrderStatus,
+  onVerifyHomeOrderPayment,
+  onVerifyTableOrderPayment,
   onDeleteHomeOrder,
   onDeleteTableOrder,
   onClearAllOrders,
@@ -79,9 +111,18 @@ export function AdminOrdersAndSheetsTab({
   onToggleRevokeReferral,
   onDeleteReferralRecord,
   onAdjustBrowserSpins,
+  adminCloudEmail,
+  adminCloudError,
+  cloudOrdersCount = 0,
+  pendingSyncCount = 0,
+  onConnectAdminCloud,
+  onDisconnectAdminCloud,
 }: AdminOrdersAndSheetsTabProps) {
   const [activeSheet, setActiveSheet] = useState<'home' | 'table' | 'referrals'>('home');
   const [flagFilter, setFlagFilter] = useState<'all' | 'flagged'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [dateFilter, setDateFilter] = useState<OrderDateFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<OrderStatusFilter>('all');
   const [confirmClearAll, setConfirmClearAll] = useState(false);
 
   // Manual cross-device WhatsApp referral verification state
@@ -106,14 +147,24 @@ export function AdminOrdersAndSheetsTab({
   const flaggedTableCount = tableOrders.filter((o) => o.isFlagged).length;
   const totalFlaggedCount = flaggedHomeCount + flaggedTableCount;
 
-  const displayedHomeOrders =
-    flagFilter === 'flagged'
-      ? homeOrders.filter((o) => o.isFlagged)
-      : homeOrders;
-  const displayedTableOrders =
-    flagFilter === 'flagged'
-      ? tableOrders.filter((o) => o.isFlagged)
-      : tableOrders;
+  const hasActiveFilters =
+    flagFilter === 'flagged' ||
+    dateFilter !== 'all' ||
+    statusFilter !== 'all' ||
+    searchQuery.trim().length > 0;
+
+  const displayedHomeOrders = filterOrdersByCriteria(homeOrders, {
+    searchQuery,
+    dateFilter,
+    statusFilter,
+    flagFilter,
+  });
+  const displayedTableOrders = filterOrdersByCriteria(tableOrders, {
+    searchQuery,
+    dateFilter,
+    statusFilter,
+    flagFilter,
+  });
 
   const handleManualReferralSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -187,6 +238,69 @@ export function AdminOrdersAndSheetsTab({
           </button>
         </div>
       </div>
+
+      {/* Isolated Admin Firebase Cloud Orders Sync Bar */}
+      {onConnectAdminCloud && (
+        <div
+          className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+            adminCloudEmail
+              ? 'bg-emerald-50/70 border-emerald-200'
+              : 'bg-stone-50 border-stone-200'
+          }`}
+        >
+          <div className="flex items-start sm:items-center gap-2.5 text-xs">
+            <Cloud
+              className={`w-4 h-4 shrink-0 mt-0.5 sm:mt-0 ${
+                adminCloudEmail ? 'text-[#15803D]' : 'text-stone-600'
+              }`}
+            />
+            <div>
+              <div className="font-bold text-stone-900">
+                {adminCloudEmail
+                  ? `Firebase Live Cloud Sync Active (${adminCloudEmail})`
+                  : 'OTP Customer Cloud Orders & Live Catalog Sync (Separate Admin Auth)'}
+              </div>
+              <div className="text-stone-600 mt-0.5">
+                {adminCloudEmail
+                  ? `${cloudOrdersCount} Web & Android Cloud ${
+                      cloudOrdersCount === 1 ? 'order' : 'orders'
+                    } + Live Menu, Cafe Open/Closed Status, Referrals, Reviews & Snaps synced via Firestore.${
+                      pendingSyncCount > 0
+                        ? ` (${pendingSyncCount} queued offline items waiting to flush)`
+                        : ''
+                    }`
+                  : 'Sign in with your authorized Cafe Admin Google account (ashuofficial2093@gmail.com) to receive live Web & Android orders and sync Menu/Prices/Status across devices.'}
+              </div>
+              {adminCloudError && (
+                <div className="mt-1 font-semibold text-[#C83E2B]">
+                  {adminCloudError}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="shrink-0">
+            {adminCloudEmail ? (
+              <button
+                type="button"
+                onClick={onDisconnectAdminCloud}
+                className="min-h-[36px] px-3 py-1.5 rounded-xl border border-stone-300 bg-white hover:bg-stone-100 text-xs font-semibold text-stone-800"
+              >
+                Disconnect Cloud Sync
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onConnectAdminCloud}
+                className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                <span>Connect Admin Google Account</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Sheet Switcher & Flag Filter */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -317,19 +431,90 @@ export function AdminOrdersAndSheetsTab({
           )}
       </div>
 
+      {/* Order Search + Date & Status Filters (Home & Table Orders) */}
+      {activeSheet !== 'referrals' && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-3 flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search Customer Name, Mobile, Order ID (HOM/TBL), Table, UTR..."
+              aria-label="Search orders by customer name, mobile, or order code"
+              className="w-full min-h-[38px] pl-8 pr-3 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
+              {(
+                [
+                  ['today', 'Today'],
+                  ['week', 'This Week'],
+                  ['all', 'All'],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setDateFilter(key)}
+                  className={`min-h-[30px] px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                    dateFilter === key
+                      ? 'bg-white text-stone-900 shadow-xs'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <select
+              aria-label="Filter orders by status"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as OrderStatusFilter)}
+              className="min-h-[36px] px-2.5 py-1 rounded-xl border border-stone-200 bg-white text-[11px] font-semibold text-stone-800 focus:outline-none focus:ring-2 focus:ring-[#C83E2B]"
+            >
+              <option value="all">All Statuses</option>
+              {ORDER_STATUS_OPTIONS.map((st) => (
+                <option key={st} value={st}>
+                  {ORDER_STATUS_META[st].label}
+                </option>
+              ))}
+            </select>
+
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setDateFilter('all');
+                  setStatusFilter('all');
+                  setFlagFilter('all');
+                }}
+                className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-[#C83E2B] hover:bg-red-50"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* SHEET 1: HOME ORDERS EXCEL SHEET */}
       {activeSheet === 'home' && (
         <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden">
           {displayedHomeOrders.length === 0 ? (
             <div className="p-10 text-center space-y-2">
               <p className="font-display text-base font-bold text-stone-900">
-                {flagFilter === 'flagged'
-                  ? 'No flagged Home Orders'
+                {hasActiveFilters
+                  ? 'No matching Home Orders'
                   : 'No Home Orders recorded yet'}
               </p>
               <p className="text-xs text-stone-500 max-w-md mx-auto">
-                {flagFilter === 'flagged'
-                  ? 'High-quantity or suspicious Home Orders flagged automatically or manually will appear here.'
+                {hasActiveFilters
+                  ? 'No Home Orders match your current search, date, status, or flag filter.'
                   : 'Whenever a customer places a Home Order on WhatsApp, their Gmail, name, phone, area/GPS, items, and ₹ total appear in this sheet automatically.'}
               </p>
             </div>
@@ -342,9 +527,9 @@ export function AdminOrdersAndSheetsTab({
                     <th className="py-3 px-3 whitespace-nowrap">Time</th>
                     <th className="py-3 px-3 whitespace-nowrap">Customer</th>
                     <th className="py-3 px-3 whitespace-nowrap">Mobile</th>
-                    <th className="py-3 px-3 whitespace-nowrap">Ward / Location</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Delivery Address / Location</th>
                     <th className="py-3 px-3 min-w-[200px]">Items Ordered</th>
-                    <th className="py-3 px-3 whitespace-nowrap text-right">Total</th>
+                    <th className="py-3 px-3 whitespace-nowrap text-right">Total &amp; Pay</th>
                     <th className="py-3 px-3 text-right whitespace-nowrap">Actions</th>
                   </tr>
                 </thead>
@@ -359,7 +544,51 @@ export function AdminOrdersAndSheetsTab({
                       }`}
                     >
                       <td className="py-3 px-3 font-mono font-semibold text-stone-800 whitespace-nowrap">
-                        <div>{order.orderCode}</div>
+                        <div className="flex items-center gap-1.5">
+                          <span>{order.orderCode}</span>
+                          {order.source === 'cloud' && (
+                            <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-900 text-[10px] font-sans font-bold">
+                              OTP Cloud
+                            </span>
+                          )}
+                          {order.sourcePlatform === 'android' && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-900 text-[10px] font-sans font-bold">
+                              Android App
+                            </span>
+                          )}
+                        </div>
+                        {onUpdateHomeOrderStatus && (
+                          <div className="mt-1.5 font-sans">
+                            <select
+                              aria-label={`Order status for ${order.orderCode}`}
+                              value={order.orderStatus || 'pending'}
+                              onChange={(e) =>
+                                onUpdateHomeOrderStatus(
+                                  order.id,
+                                  e.target.value as OrderStatus
+                                )
+                              }
+                              className={`px-2 py-0.5 rounded-md border text-[11px] font-semibold focus:outline-none focus:ring-2 focus:ring-[#C83E2B] ${
+                                (
+                                  ORDER_STATUS_META[order.orderStatus || 'pending'] ||
+                                  ORDER_STATUS_META.pending
+                                ).badgeClass
+                              }`}
+                            >
+                              {ORDER_STATUS_OPTIONS.map((st) => (
+                                <option key={st} value={st}>
+                                  {ORDER_STATUS_META[st].label}
+                                </option>
+                              ))}
+                              {(order.orderStatus === 'confirmed' ||
+                                order.orderStatus === 'completed') && (
+                                <option value={order.orderStatus}>
+                                  {ORDER_STATUS_META[order.orderStatus].label}
+                                </option>
+                              )}
+                            </select>
+                          </div>
+                        )}
                         {order.referralCodeUsed && (
                           <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-sans font-bold">
                             Ref: {order.referralCodeUsed}
@@ -388,11 +617,29 @@ export function AdminOrdersAndSheetsTab({
                       <td className="py-3 px-3 text-stone-600 whitespace-nowrap tabular-nums">
                         {order.alternatePhone || '—'}
                       </td>
-                      <td className="py-3 px-3 text-stone-700">
-                        <div>{order.wardArea || 'Via GPS Pin'}</div>
-                        {order.geoLocationUrl && (
+                      <td className="py-3 px-3 text-stone-700 max-w-[240px]">
+                        {order.deliveryAddress?.trim() && (
+                          <div className="font-semibold text-stone-900 leading-snug">
+                            {order.deliveryAddress.trim()}
+                          </div>
+                        )}
+                        <div
+                          className={
+                            order.deliveryAddress?.trim()
+                              ? 'text-[11px] text-stone-600 mt-0.5'
+                              : 'font-medium text-stone-800'
+                          }
+                        >
+                          {composeWardAreaLabel(order) ||
+                            (order.deliveryAddress?.trim()
+                              ? ''
+                              : isValidGpsMapsUrl(order.geoLocationUrl)
+                              ? 'Via GPS Pin'
+                              : '—')}
+                        </div>
+                        {isValidGpsMapsUrl(order.geoLocationUrl) && (
                           <a
-                            href={order.geoLocationUrl}
+                            href={sanitizeGpsLocationUrl(order.geoLocationUrl)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#15803D] hover:underline mt-0.5"
@@ -435,10 +682,57 @@ export function AdminOrdersAndSheetsTab({
                         )}
                       </td>
                       <td className="py-3 px-3 font-bold text-stone-900 whitespace-nowrap text-right tabular-nums">
-                        ₹{order.totalAmount}
+                        <div>₹{order.totalAmount}</div>
+                        {(order.pointsDiscount ?? 0) > 0 && (
+                          <div className="text-[10px] font-semibold text-[#15803D]">
+                            -₹{order.pointsDiscount} pts off
+                          </div>
+                        )}
+                        <div className="mt-1">
+                          {order.paymentStatus === 'paid' ? (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-[#15803D] text-[10px] font-bold">
+                              PAID ({order.paymentMethod === 'upi' ? 'UPI' : 'Cash'})
+                            </span>
+                          ) : order.paymentMethod === 'upi' ? (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                              UPI Pending Verification
+                            </span>
+                          ) : (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-semibold">
+                              Cash
+                            </span>
+                          )}
+                        </div>
+                        {order.upiRefNote && (
+                          <div className="text-[10px] font-mono text-stone-600 mt-0.5">
+                            UTR: {order.upiRefNote}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
+                          {onVerifyHomeOrderPayment && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onVerifyHomeOrderPayment(
+                                  order.id,
+                                  order.paymentStatus === 'paid'
+                                    ? order.paymentMethod === 'upi'
+                                      ? 'pending_verification'
+                                      : 'unpaid'
+                                    : 'paid'
+                                )
+                              }
+                              className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${
+                                order.paymentStatus === 'paid'
+                                  ? 'border border-stone-200 bg-white hover:bg-stone-100 text-stone-700'
+                                  : 'bg-stone-900 hover:bg-stone-800 text-white'
+                              }`}
+                            >
+                              {order.paymentStatus === 'paid' ? 'Mark Unpaid' : 'Confirm Paid'}
+                            </button>
+                          )}
                           <a
                             href={buildHomeReceiptWhatsappUrl(settings, order)}
                             target="_blank"
@@ -494,13 +788,13 @@ export function AdminOrdersAndSheetsTab({
           {displayedTableOrders.length === 0 ? (
             <div className="p-10 text-center space-y-2">
               <p className="font-display text-base font-bold text-stone-900">
-                {flagFilter === 'flagged'
-                  ? 'No flagged Table Orders'
+                {hasActiveFilters
+                  ? 'No matching Table Orders'
                   : 'No Table Orders recorded yet'}
               </p>
               <p className="text-xs text-stone-500 max-w-md mx-auto">
-                {flagFilter === 'flagged'
-                  ? 'High-quantity or suspicious Table Orders flagged automatically or manually will appear here.'
+                {hasActiveFilters
+                  ? 'No Table Orders match your current search, date, status, or flag filter.'
                   : 'Whenever a dine-in guest sends an order on WhatsApp from their Live Table Bill, each order batch is logged here cleanly.'}
               </p>
             </div>
@@ -511,9 +805,9 @@ export function AdminOrdersAndSheetsTab({
                   <tr className="bg-stone-50 border-b border-stone-200 text-stone-600 font-semibold">
                     <th className="py-3 px-3 whitespace-nowrap">Order ID</th>
                     <th className="py-3 px-3 whitespace-nowrap">Time</th>
-                    <th className="py-3 px-3 whitespace-nowrap">Table / Counter</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Table / Mobile</th>
                     <th className="py-3 px-3 min-w-[220px]">Items Ordered</th>
-                    <th className="py-3 px-3 whitespace-nowrap text-right">Order ₹</th>
+                    <th className="py-3 px-3 whitespace-nowrap text-right">Order ₹ &amp; Pay</th>
                     <th className="py-3 px-3 whitespace-nowrap text-right">Session ₹</th>
                     <th className="py-3 px-3 text-right whitespace-nowrap">Actions</th>
                   </tr>
@@ -529,7 +823,51 @@ export function AdminOrdersAndSheetsTab({
                       }`}
                     >
                       <td className="py-3 px-3 font-mono font-semibold text-stone-800 whitespace-nowrap">
-                        <div>{order.orderCode}</div>
+                        <div className="flex items-center gap-1.5">
+                          <span>{order.orderCode}</span>
+                          {order.source === 'cloud' && (
+                            <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-900 text-[10px] font-sans font-bold">
+                              OTP Cloud
+                            </span>
+                          )}
+                          {order.sourcePlatform === 'android' && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-900 text-[10px] font-sans font-bold">
+                              Android App
+                            </span>
+                          )}
+                        </div>
+                        {onUpdateTableOrderStatus && (
+                          <div className="mt-1.5 font-sans">
+                            <select
+                              aria-label={`Order status for ${order.orderCode}`}
+                              value={order.orderStatus || 'pending'}
+                              onChange={(e) =>
+                                onUpdateTableOrderStatus(
+                                  order.id,
+                                  e.target.value as OrderStatus
+                                )
+                              }
+                              className={`px-2 py-0.5 rounded-md border text-[11px] font-semibold focus:outline-none focus:ring-2 focus:ring-[#C83E2B] ${
+                                (
+                                  ORDER_STATUS_META[order.orderStatus || 'pending'] ||
+                                  ORDER_STATUS_META.pending
+                                ).badgeClass
+                              }`}
+                            >
+                              {ORDER_STATUS_OPTIONS.map((st) => (
+                                <option key={st} value={st}>
+                                  {ORDER_STATUS_META[st].label}
+                                </option>
+                              ))}
+                              {(order.orderStatus === 'confirmed' ||
+                                order.orderStatus === 'completed') && (
+                                <option value={order.orderStatus}>
+                                  {ORDER_STATUS_META[order.orderStatus].label}
+                                </option>
+                              )}
+                            </select>
+                          </div>
+                        )}
                         {order.referralCodeUsed && (
                           <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-sans font-bold">
                             Ref: {order.referralCodeUsed}
@@ -545,8 +883,15 @@ export function AdminOrdersAndSheetsTab({
                       <td className="py-3 px-3 text-stone-500 whitespace-nowrap tabular-nums">
                         {formatOrderTimestamp(order.timestamp)}
                       </td>
-                      <td className="py-3 px-3 font-semibold text-stone-900 whitespace-nowrap">
-                        {order.tableNumber || 'Counter / QR'}
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        <div className="font-semibold text-stone-900">
+                          {order.tableNumber || 'Counter / QR'}
+                        </div>
+                        {order.customerPhone && (
+                          <div className="text-[11px] text-stone-600 tabular-nums mt-0.5">
+                            {order.customerPhone}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-stone-700">
                         {order.isFlagged && (
@@ -586,13 +931,60 @@ export function AdminOrdersAndSheetsTab({
                         )}
                       </td>
                       <td className="py-3 px-3 font-bold text-stone-900 whitespace-nowrap text-right tabular-nums">
-                        ₹{order.newOrderAmount}
+                        <div>₹{order.newOrderAmount}</div>
+                        {(order.pointsDiscount ?? 0) > 0 && (
+                          <div className="text-[10px] font-semibold text-[#15803D]">
+                            -₹{order.pointsDiscount} pts off
+                          </div>
+                        )}
+                        <div className="mt-1">
+                          {order.paymentStatus === 'paid' ? (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-[#15803D] text-[10px] font-bold">
+                              PAID ({order.paymentMethod === 'upi' ? 'UPI' : 'Cash'})
+                            </span>
+                          ) : order.paymentMethod === 'upi' ? (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                              UPI Pending Verification
+                            </span>
+                          ) : (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-semibold">
+                              Cash
+                            </span>
+                          )}
+                        </div>
+                        {order.upiRefNote && (
+                          <div className="text-[10px] font-mono text-stone-600 mt-0.5">
+                            UTR: {order.upiRefNote}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-stone-600 whitespace-nowrap text-right tabular-nums">
                         ₹{order.sessionTotalAmount}
                       </td>
                       <td className="py-3 px-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
+                          {onVerifyTableOrderPayment && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onVerifyTableOrderPayment(
+                                  order.id,
+                                  order.paymentStatus === 'paid'
+                                    ? order.paymentMethod === 'upi'
+                                      ? 'pending_verification'
+                                      : 'unpaid'
+                                    : 'paid'
+                                )
+                              }
+                              className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${
+                                order.paymentStatus === 'paid'
+                                  ? 'border border-stone-200 bg-white hover:bg-stone-100 text-stone-700'
+                                  : 'bg-stone-900 hover:bg-stone-800 text-white'
+                              }`}
+                            >
+                              {order.paymentStatus === 'paid' ? 'Mark Unpaid' : 'Confirm Paid'}
+                            </button>
+                          )}
                           <a
                             href={buildTableReceiptWhatsappUrl(settings, order)}
                             target="_blank"

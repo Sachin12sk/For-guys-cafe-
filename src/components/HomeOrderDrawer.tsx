@@ -1,4 +1,4 @@
-import { useEffect, useState, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import {
   X,
   Minus,
@@ -17,12 +17,18 @@ import {
   Clock,
   AlertTriangle,
   Store,
+  Phone,
+  ShieldCheck,
+  Gift,
+  QrCode,
+  Smartphone,
 } from 'lucide-react';
 import type {
   CafeSettings,
   CartItem,
   HomeOrderDetails,
   LoyaltyState,
+  PaymentMethod,
 } from '../types';
 import {
   buildHomeOrderWhatsappText,
@@ -37,7 +43,22 @@ import {
   validateCustomerName,
   validateIndianMobileNumber,
 } from '../utils/security';
+import { calculatePointsRedemption } from '../utils/loyalty';
+import {
+  buildUpiPaymentUri,
+  generateQrDataUrl,
+  isValidUpiId,
+  normalizeUpiId,
+} from '../utils/upi';
 import { ResilientImage } from './ResilientImage';
+import { normalizeHomeMinOrder } from '../utils/storage';
+import {
+  composeWardAreaLabel,
+  requestConsentedGpsLocation,
+  sanitizeGpsLocationUrl,
+  splitLegacyWardArea,
+} from '../utils/location';
+import type { CheckoutSubmissionMeta } from './BasketDrawer';
 
 interface HomeOrderDrawerProps {
   isOpen: boolean;
@@ -49,12 +70,21 @@ interface HomeOrderDrawerProps {
   loadedProfileGmail: string | null;
   lastOrderAt: number | null;
   loyalty?: LoyaltyState;
+  verifiedPhone?: string | null;
+  redeemPoints: boolean;
+  onRedeemPointsChange: (val: boolean) => void;
+  paymentMethod: PaymentMethod;
+  onPaymentMethodChange: (val: PaymentMethod) => void;
+  upiRefNote: string;
+  onUpiRefNoteChange: (val: string) => void;
+  onOpenPhoneAuth?: () => void;
   onGmailChange: (nextGmail: string) => void;
   onDetailsChange: (next: HomeOrderDetails) => void;
+  onClearGpsPin?: () => void;
   onUpdateLineQuantity: (lineId: string, nextQty: number) => void;
   onToggleLineSelected: (lineId: string) => void;
   onRemoveLine: (lineId: string) => void;
-  onRecordHomeOrder: () => void;
+  onRecordHomeOrder: (meta: CheckoutSubmissionMeta) => void;
   onClearCart: () => void;
 }
 
@@ -76,8 +106,17 @@ export function HomeOrderDrawer({
   loadedProfileGmail,
   lastOrderAt,
   loyalty,
+  verifiedPhone,
+  redeemPoints,
+  onRedeemPointsChange,
+  paymentMethod,
+  onPaymentMethodChange,
+  upiRefNote,
+  onUpiRefNoteChange,
+  onOpenPhoneAuth,
   onGmailChange,
   onDetailsChange,
+  onClearGpsPin,
   onUpdateLineQuantity,
   onToggleLineSelected,
   onRemoveLine,
@@ -87,11 +126,14 @@ export function HomeOrderDrawer({
   const [locLoading, setLocLoading] = useState(false);
   const [locError, setLocError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [copiedUpi, setCopiedUpi] = useState(false);
+  const [upiQrDataUrl, setUpiQrDataUrl] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
   const [acceptedNoReturn, setAcceptedNoReturn] = useState(false);
   const [sentBanner, setSentBanner] = useState(false);
   const [honeypot, setHoneypot] = useState('');
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const isSubmittingRef = useRef(false);
 
   const cooldownSeconds = Math.max(
     0,
@@ -116,9 +158,7 @@ export function HomeOrderDrawer({
     return () => window.clearInterval(timer);
   }, [isOpen, remainingCooldown]);
 
-  if (!isOpen) return null;
-
-  const minOrder = Math.max(0, Number(settings.homeMinOrder) || 150);
+  const minOrder = normalizeHomeMinOrder(settings.homeMinOrder);
   const deliveryFee = Math.max(0, Number(settings.homeDeliveryFee ?? 0));
   const selectedItems = items.filter((i) => i.selected !== false);
   const selectedCount = selectedItems.reduce((sum, i) => sum + i.quantity, 0);
@@ -126,18 +166,73 @@ export function HomeOrderDrawer({
     (sum, i) => sum + i.product.price * i.quantity,
     0
   );
-  const payableTotal = grandTotal + deliveryFee;
+
+  const redemption = calculatePointsRedemption({
+    availablePoints: loyalty?.points ?? 0,
+    subtotal: grandTotal,
+    settings,
+    redeemRequested: redeemPoints,
+  });
+
+  const payableTotal =
+    Math.max(0, grandTotal - redemption.discountAmount) + deliveryFee;
   const shortfall = Math.max(0, minOrder - grandTotal);
   const meetsMinimum = grandTotal >= minOrder;
   const progressPct =
     minOrder > 0 ? Math.min(100, Math.round((grandTotal / minOrder) * 100)) : 100;
 
+  const hasConfiguredUpi = isValidUpiId(settings.upiId);
+  const effectivePaymentMethod: PaymentMethod =
+    paymentMethod === 'upi' && hasConfiguredUpi && payableTotal > 0 ? 'upi' : 'cash';
+
+  const upiUri =
+    effectivePaymentMethod === 'upi'
+      ? buildUpiPaymentUri({
+          upiId: settings.upiId,
+          payeeName: settings.upiPayeeName || settings.cafeName,
+          amount: payableTotal,
+          orderNote: `${settings.cafeName} Home Order`,
+        })
+      : '';
+
+  useEffect(() => {
+    let active = true;
+    if (!isOpen || !upiUri) {
+      setUpiQrDataUrl('');
+      return;
+    }
+    void generateQrDataUrl(upiUri, 200)
+      .then((url) => {
+        if (active) setUpiQrDataUrl(url);
+      })
+      .catch(() => {
+        if (active) setUpiQrDataUrl('');
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, upiUri]);
+
+  if (!isOpen) return null;
+
   const trimmedGmail = details.gmail.trim();
   const hasValidGmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedGmail);
   const nameCheck = validateCustomerName(details.customerName);
   const phoneCheck = validateIndianMobileNumber(details.alternatePhone);
+  const splitLoc = splitLegacyWardArea(
+    details.wardArea,
+    details.ward,
+    details.area
+  );
+  const wardValue = details.ward !== undefined ? details.ward : splitLoc.ward;
+  const areaValue = details.area !== undefined ? details.area : splitLoc.area;
+  const deliveryAddressValue = details.deliveryAddress || '';
+  const safeGeoUrl = sanitizeGpsLocationUrl(details.geoLocationUrl);
   const hasLocation =
-    details.wardArea.trim().length > 0 || details.geoLocationUrl.trim().length > 0;
+    deliveryAddressValue.trim().length > 0 ||
+    areaValue.trim().length > 0 ||
+    details.wardArea.trim().length > 0 ||
+    safeGeoUrl.length > 0;
 
   const threshold = Math.max(1, Number(settings.highQuantityThreshold ?? 10));
   const highQty = detectHighQuantityItems(selectedItems, threshold);
@@ -155,60 +250,54 @@ export function HomeOrderDrawer({
     acceptedNoReturn &&
     selectedItems.length > 0;
 
+  const checkoutExtras = {
+    pointsRedeemed: redemption.pointsToDeduct,
+    pointsDiscount: redemption.discountAmount,
+    paymentMethod: effectivePaymentMethod,
+    upiRefNote,
+  };
+
   const whatsappUrl = buildHomeOrderWhatsappUrl(
     settings,
     selectedItems,
     details,
-    loyalty
+    loyalty,
+    checkoutExtras
   );
   const orderText = buildHomeOrderWhatsappText(
     settings,
     selectedItems,
     details,
-    loyalty
+    loyalty,
+    checkoutExtras
   );
   const effectivePhone = getEffectiveHomeWhatsappNumber(settings);
 
-  const handleUseCurrentLocation = () => {
+  const handleUseCurrentLocation = async () => {
     setLocError('');
-    if (!('geolocation' in navigator)) {
-      setLocError(
-        'GPS not supported on this browser — please type your Ward / Area above.'
-      );
+    setLocLoading(true);
+    const result = await requestConsentedGpsLocation({ userInitiated: true });
+    setLocLoading(false);
+
+    if (result.granted && result.geoLocationUrl) {
+      onDetailsChange({
+        ...details,
+        geoLocationUrl: result.geoLocationUrl,
+      });
       return;
     }
 
-    setLocLoading(true);
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const { latitude, longitude } = position.coords;
-        const mapsLink = `https://maps.google.com/?q=${latitude.toFixed(
-          6
-        )},${longitude.toFixed(6)}`;
+    setLocError(result.message);
+    if (result.status === 'denied' && details.geoLocationUrl) {
+      if (onClearGpsPin) {
+        onClearGpsPin();
+      } else {
         onDetailsChange({
           ...details,
-          geoLocationUrl: mapsLink,
+          geoLocationUrl: '',
         });
-        setLocLoading(false);
-      },
-      (err) => {
-        setLocLoading(false);
-        if (err.code === err.PERMISSION_DENIED) {
-          setLocError(
-            'Location permission denied — just enter your Ward or Area name above.'
-          );
-        } else {
-          setLocError(
-            'Could not fetch GPS right now — please enter your Ward or Area above.'
-          );
-        }
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 60000,
       }
-    );
+    }
   };
 
   const handleCopySummary = async () => {
@@ -221,18 +310,45 @@ export function HomeOrderDrawer({
     }
   };
 
+  const handleCopyUpiId = async () => {
+    const clean = normalizeUpiId(settings.upiId);
+    if (!clean) return;
+    try {
+      await navigator.clipboard.writeText(clean);
+      setCopiedUpi(true);
+      setTimeout(() => setCopiedUpi(false), 2000);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
+
   const handleWhatsappClick = (e: MouseEvent<HTMLAnchorElement>) => {
-    // Block if cafe is closed, honeypot field is filled, or cooldown is active
-    if (!isCafeOpen || honeypot.trim().length > 0 || remainingCooldown > 0) {
+    // Block if cafe is closed, honeypot field is filled, cooldown active, or rapid double-submit
+    if (
+      !isCafeOpen ||
+      honeypot.trim().length > 0 ||
+      remainingCooldown > 0 ||
+      isSubmittingRef.current
+    ) {
       e.preventDefault();
       return;
     }
+    const capturedMeta: CheckoutSubmissionMeta = {
+      pointsRedeemed: redemption.pointsToDeduct,
+      pointsDiscount: redemption.discountAmount,
+      paymentMethod: effectivePaymentMethod,
+      upiRefNote: upiRefNote.trim(),
+    };
+    isSubmittingRef.current = true;
     setTimeout(() => {
-      onRecordHomeOrder();
+      onRecordHomeOrder(capturedMeta);
       setNowMs(Date.now());
       setSentBanner(true);
       setTimeout(() => setSentBanner(false), 6000);
     }, 60);
+    setTimeout(() => {
+      isSubmittingRef.current = false;
+    }, 1500);
   };
 
   return (
@@ -328,6 +444,36 @@ export function HomeOrderDrawer({
                 </span>
               )}
             </div>
+
+            {onOpenPhoneAuth && (
+              <div
+                className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 text-xs ${
+                  verifiedPhone
+                    ? 'bg-[#15803D]/10 border-[#15803D]/30 text-[#15803D]'
+                    : 'bg-stone-50 border-stone-200 text-stone-700'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  {verifiedPhone ? (
+                    <ShieldCheck className="w-4 h-4 shrink-0 text-[#15803D]" />
+                  ) : (
+                    <Phone className="w-4 h-4 shrink-0 text-[#C83E2B]" />
+                  )}
+                  <span className="font-semibold truncate tabular-nums">
+                    {verifiedPhone
+                      ? `OTP Verified: ${verifiedPhone}`
+                      : 'Mobile OTP Login (सुरक्षित प्रोफ़ाइल)'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={onOpenPhoneAuth}
+                  className="px-2.5 py-1 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-[11px] font-bold text-stone-900 whitespace-nowrap shrink-0"
+                >
+                  {verifiedPhone ? 'Account / Logout' : 'Verify via OTP'}
+                </button>
+              </div>
+            )}
 
             {/* Gmail Field */}
             <div className="space-y-1.5">
@@ -465,67 +611,161 @@ export function HomeOrderDrawer({
               )}
             </div>
 
-            {/* Ward / Area + Quick Chips + GPS Location */}
-            <div className="space-y-2">
-              <label
-                htmlFor="home-ward-area"
-                className="block text-xs font-semibold text-stone-700"
-              >
-                Ward / Area or Current Location *
-              </label>
+            {/* Ward, Area, Full Delivery Address & Permission-Gated GPS Location */}
+            <div className="space-y-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label
+                    htmlFor="home-ward-input"
+                    className="block text-xs font-semibold text-stone-700 mb-1"
+                  >
+                    Ward (वार्ड)
+                  </label>
+                  <input
+                    id="home-ward-input"
+                    type="text"
+                    maxLength={60}
+                    value={wardValue}
+                    onChange={(e) => {
+                      const nextWard = e.target.value;
+                      onDetailsChange({
+                        ...details,
+                        ward: nextWard,
+                        area: areaValue,
+                        wardArea: composeWardAreaLabel({
+                          ward: nextWard,
+                          area: areaValue,
+                        }),
+                      });
+                    }}
+                    placeholder="e.g. Ward 7"
+                    className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                  />
+                </div>
 
-              <input
-                id="home-ward-area"
-                type="text"
-                value={details.wardArea}
-                onChange={(e) =>
-                  onDetailsChange({ ...details, wardArea: e.target.value })
-                }
-                placeholder="e.g. Ward 7, Kakawan Road, Bilhaur"
-                className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
-              />
+                <div>
+                  <label
+                    htmlFor="home-ward-area"
+                    className="block text-xs font-semibold text-stone-700 mb-1"
+                  >
+                    Area / Mohalla *
+                  </label>
+                  <input
+                    id="home-ward-area"
+                    type="text"
+                    maxLength={100}
+                    value={areaValue}
+                    onChange={(e) => {
+                      const nextArea = e.target.value;
+                      onDetailsChange({
+                        ...details,
+                        ward: wardValue,
+                        area: nextArea,
+                        wardArea: composeWardAreaLabel({
+                          ward: wardValue,
+                          area: nextArea,
+                        }),
+                      });
+                    }}
+                    placeholder="e.g. Kakawan Road, Bilhaur"
+                    className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                  />
+                </div>
+              </div>
 
               <div className="flex flex-wrap gap-1.5 pt-0.5">
-                {BILHAUR_QUICK_AREAS.map((area) => (
+                {BILHAUR_QUICK_AREAS.map((areaOption) => (
                   <button
-                    key={area}
+                    key={areaOption}
                     type="button"
                     onClick={() =>
-                      onDetailsChange({ ...details, wardArea: area })
+                      onDetailsChange({
+                        ...details,
+                        ward: wardValue,
+                        area: areaOption,
+                        wardArea: composeWardAreaLabel({
+                          ward: wardValue,
+                          area: areaOption,
+                        }),
+                      })
                     }
                     className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${
-                      details.wardArea === area
+                      areaValue === areaOption
                         ? 'bg-stone-900 text-white border-stone-900'
                         : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
                     }`}
                   >
-                    {area}
+                    {areaOption}
                   </button>
                 ))}
               </div>
 
-              <div className="pt-1 flex items-center gap-2">
+              <div>
+                <label
+                  htmlFor="home-delivery-address"
+                  className="block text-xs font-semibold text-stone-700 mb-1"
+                >
+                  Full Delivery Address (पूरा पता) *
+                </label>
+                <textarea
+                  id="home-delivery-address"
+                  rows={2}
+                  maxLength={250}
+                  value={deliveryAddressValue}
+                  onChange={(e) =>
+                    onDetailsChange({
+                      ...details,
+                      ward: wardValue,
+                      area: areaValue,
+                      wardArea: composeWardAreaLabel({
+                        ward: wardValue,
+                        area: areaValue,
+                        wardArea: details.wardArea,
+                      }),
+                      deliveryAddress: e.target.value,
+                    })
+                  }
+                  placeholder="House / Shop No., Gali / Street, Near Landmark, Bilhaur"
+                  className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white resize-none"
+                />
+                <p className="text-[11px] text-stone-500 mt-1">
+                  GPS बंद या Permission न होने पर भी आप यहाँ अपना पूरा पता लिखकर आसानी से ऑर्डर कर सकते हैं।
+                </p>
+              </div>
+
+              <div className="pt-0.5 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={handleUseCurrentLocation}
+                  onClick={() => void handleUseCurrentLocation()}
                   disabled={locLoading}
                   className="min-h-[40px] px-3.5 py-2 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
                 >
                   <Navigation className="w-3.5 h-3.5 text-[#C83E2B]" />
                   <span>
-                    {locLoading ? 'Getting GPS...' : 'Use Current Location'}
+                    {locLoading ? 'Requesting GPS...' : 'Use Current GPS Location'}
                   </span>
                 </button>
 
-                {details.geoLocationUrl && (
+                {safeGeoUrl && (
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-[#15803D]">
                     <MapPin className="w-3.5 h-3.5" />
-                    <span>Pinned</span>
+                    <a
+                      href={safeGeoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline"
+                    >
+                      GPS Pinned
+                    </a>
                     <button
                       type="button"
-                      onClick={() =>
-                        onDetailsChange({ ...details, geoLocationUrl: '' })
-                      }
+                      onClick={() => {
+                        if (onClearGpsPin) {
+                          onClearGpsPin();
+                        } else {
+                          onDetailsChange({ ...details, geoLocationUrl: '' });
+                        }
+                      }}
                       className="text-stone-400 hover:text-stone-700 ml-1"
                       aria-label="Clear GPS pin"
                     >
@@ -791,7 +1031,7 @@ export function HomeOrderDrawer({
 
         {/* Sticky Checkout Footer */}
         {items.length > 0 && (
-          <div className="p-5 bg-white border-t border-stone-200 space-y-3">
+          <div className="p-5 bg-white border-t border-stone-200 space-y-3 max-h-[58vh] overflow-y-auto">
             {!isCafeOpen && (
               <div className="px-3.5 py-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-[#C83E2B] flex items-start gap-2">
                 <Store className="w-4 h-4 shrink-0 mt-0.5" />
@@ -818,6 +1058,40 @@ export function HomeOrderDrawer({
               </div>
             )}
 
+            {settings.loyaltyEnabled !== false && loyalty && (
+              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-amber-50/90 border border-amber-200 text-xs">
+                <div className="min-w-0">
+                  <div className="font-bold text-stone-900 flex items-center gap-1.5">
+                    <Gift className="w-3.5 h-3.5 text-[#C83E2B] shrink-0" />
+                    <span className="tabular-nums">
+                      Points: {loyalty.points}/{redemption.thresholdPoints}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-stone-600 truncate">
+                    {redemption.eligible
+                      ? `Redeem ${redemption.thresholdPoints} pts for ₹${redemption.discountPerReward} instant discount`
+                      : `Need ${redemption.pointsShortfall} more pts to unlock ₹${redemption.discountPerReward} off`}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!redemption.eligible}
+                  onClick={() => onRedeemPointsChange(!redeemPoints)}
+                  className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                    redemption.canApply
+                      ? 'bg-[#15803D] text-white'
+                      : redemption.eligible
+                      ? 'bg-stone-900 hover:bg-stone-800 text-white'
+                      : 'bg-stone-200 text-stone-500 cursor-not-allowed'
+                  }`}
+                >
+                  {redemption.canApply
+                    ? `Applied (-₹${redemption.discountAmount})`
+                    : 'Redeem Points'}
+                </button>
+              </div>
+            )}
+
             <div className="space-y-1">
               <div className="flex items-center justify-between text-xs text-stone-600 tabular-nums">
                 <span>
@@ -826,6 +1100,12 @@ export function HomeOrderDrawer({
                 </span>
                 <span className="font-semibold text-stone-800">₹{grandTotal}</span>
               </div>
+              {redemption.discountAmount > 0 && (
+                <div className="flex items-center justify-between text-xs text-[#15803D] font-semibold tabular-nums">
+                  <span>Points Discount ({redemption.pointsToDeduct} pts)</span>
+                  <span>-₹{redemption.discountAmount}</span>
+                </div>
+              )}
               <div className="flex items-center justify-between text-xs text-stone-600 tabular-nums">
                 <span>Delivery Fee</span>
                 <span
@@ -847,6 +1127,96 @@ export function HomeOrderDrawer({
                 </span>
               </div>
             </div>
+
+            {payableTotal > 0 && (
+              <div className="space-y-2 pt-0.5">
+                {hasConfiguredUpi ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-1.5 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => onPaymentMethodChange('cash')}
+                        className={`min-h-[36px] px-3 py-1.5 rounded-xl border font-semibold transition-colors ${
+                          effectivePaymentMethod === 'cash'
+                            ? 'bg-stone-900 text-white border-stone-900'
+                            : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                        }`}
+                      >
+                        Cash on Delivery
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onPaymentMethodChange('upi')}
+                        className={`min-h-[36px] px-3 py-1.5 rounded-xl border font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                          effectivePaymentMethod === 'upi'
+                            ? 'bg-[#15803D] text-white border-[#15803D]'
+                            : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                        }`}
+                      >
+                        <QrCode className="w-3.5 h-3.5" />
+                        <span>Pay via UPI QR</span>
+                      </button>
+                    </div>
+
+                    {effectivePaymentMethod === 'upi' && (
+                      <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2.5 text-xs">
+                        <div className="flex items-center gap-3">
+                          {upiQrDataUrl && (
+                            <img
+                              src={upiQrDataUrl}
+                              alt={`UPI QR for ₹${payableTotal}`}
+                              className="w-24 h-24 rounded-lg border border-stone-200 bg-white p-1 shrink-0"
+                            />
+                          )}
+                          <div className="min-w-0 space-y-1.5 flex-1">
+                            <div className="font-bold text-stone-900 tabular-nums">
+                              Scan &amp; Pay ₹{payableTotal}
+                            </div>
+                            <div className="text-[11px] font-mono text-stone-700 break-all">
+                              {normalizeUpiId(settings.upiId)}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {upiUri && (
+                                <a
+                                  href={upiUri}
+                                  className="px-2.5 py-1 rounded-lg bg-[#15803D] hover:bg-[#166534] text-white text-[11px] font-semibold inline-flex items-center gap-1"
+                                >
+                                  <Smartphone className="w-3 h-3" />
+                                  <span>Open UPI App</span>
+                                </a>
+                              )}
+                              <button
+                                type="button"
+                                onClick={handleCopyUpiId}
+                                className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-semibold text-stone-800 inline-flex items-center gap-1"
+                              >
+                                <Copy className="w-3 h-3" />
+                                <span>{copiedUpi ? 'Copied UPI' : 'Copy UPI ID'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <input
+                          type="text"
+                          maxLength={40}
+                          value={upiRefNote}
+                          onChange={(e) => onUpiRefNoteChange(e.target.value)}
+                          placeholder="Optional UTR / UPI Ref No. after paying"
+                          className="w-full min-h-[36px] px-2.5 py-1.5 rounded-lg border border-stone-200 bg-white text-xs text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#15803D]"
+                        />
+                        <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 leading-snug">
+                          Order will show <span className="font-semibold">Pending Verification</span> until Cafe staff confirms real UPI receipt.
+                        </p>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-[11px] text-stone-500">
+                    Payment: Cash on Delivery (UPI QR can be enabled in Cafe Admin Settings).
+                  </p>
+                )}
+              </div>
+            )}
 
             {!isCafeOpen ? (
               <button
@@ -898,7 +1268,7 @@ export function HomeOrderDrawer({
                     : !phoneCheck.valid
                     ? phoneCheck.reason || 'Enter a valid 10-digit mobile number'
                     : !hasLocation
-                    ? 'Enter Ward / Area or Current Location'
+                    ? 'Enter Delivery Address / Area above'
                     : 'Confirm No Return Policy checkbox above'}
                 </span>
               </button>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { subscribeNativeNetworkStatus } from '../utils/nativeAndroid';
 
 export function useOnlineStatus() {
   const [isOnline, setIsOnline] = useState(
@@ -11,10 +12,14 @@ export function useOnlineStatus() {
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    const unsubscribeNative = subscribeNativeNetworkStatus((online) => {
+      setIsOnline(online);
+    });
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      unsubscribeNative();
     };
   }, []);
 

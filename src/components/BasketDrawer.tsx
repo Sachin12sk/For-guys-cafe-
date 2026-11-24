@@ -1,4 +1,4 @@
-import { useState, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import {
   X,
   Minus,
@@ -11,15 +11,42 @@ import {
   RotateCcw,
   AlertTriangle,
   Store,
+  Gift,
+  QrCode,
+  Phone,
+  Smartphone,
 } from 'lucide-react';
-import type { CafeSettings, CartItem, LoyaltyState, Product } from '../types';
+import type {
+  CafeSettings,
+  CartItem,
+  LoyaltyState,
+  PaymentMethod,
+  Product,
+} from '../types';
 import {
   buildWhatsappOrderText,
   buildWhatsappOrderUrl,
   formatWhatsappDisplay,
 } from '../utils/whatsapp';
-import { detectHighQuantityItems } from '../utils/security';
+import {
+  detectHighQuantityItems,
+  validateIndianMobileNumber,
+} from '../utils/security';
+import { calculatePointsRedemption } from '../utils/loyalty';
+import {
+  buildUpiPaymentUri,
+  generateQrDataUrl,
+  isValidUpiId,
+  normalizeUpiId,
+} from '../utils/upi';
 import { ResilientImage } from './ResilientImage';
+
+export interface CheckoutSubmissionMeta {
+  pointsRedeemed: number;
+  pointsDiscount: number;
+  paymentMethod: PaymentMethod;
+  upiRefNote: string;
+}
 
 interface BasketDrawerProps {
   isOpen: boolean;
@@ -28,13 +55,21 @@ interface BasketDrawerProps {
   settings: CafeSettings;
   tableNumber: string;
   onTableNumberChange: (val: string) => void;
+  customerPhone: string;
+  onCustomerPhoneChange: (val: string) => void;
   customerNote: string;
   onCustomerNoteChange: (val: string) => void;
   loyalty?: LoyaltyState;
+  redeemPoints: boolean;
+  onRedeemPointsChange: (val: boolean) => void;
+  paymentMethod: PaymentMethod;
+  onPaymentMethodChange: (val: PaymentMethod) => void;
+  upiRefNote: string;
+  onUpiRefNoteChange: (val: string) => void;
   onAddOneMore: (product: Product) => void;
   onUpdateLineQuantity: (lineId: string, nextQty: number) => void;
   onRemoveLine: (lineId: string) => void;
-  onRecordTableOrder: () => void;
+  onRecordTableOrder: (meta: CheckoutSubmissionMeta) => void;
   onMarkAllSent: () => void;
   onResetSession: () => void;
 }
@@ -46,9 +81,17 @@ export function BasketDrawer({
   settings,
   tableNumber,
   onTableNumberChange,
+  customerPhone,
+  onCustomerPhoneChange,
   customerNote,
   onCustomerNoteChange,
   loyalty,
+  redeemPoints,
+  onRedeemPointsChange,
+  paymentMethod,
+  onPaymentMethodChange,
+  upiRefNote,
+  onUpiRefNoteChange,
   onAddOneMore,
   onUpdateLineQuantity,
   onRemoveLine,
@@ -57,11 +100,12 @@ export function BasketDrawer({
   onResetSession,
 }: BasketDrawerProps) {
   const [copied, setCopied] = useState(false);
+  const [copiedUpi, setCopiedUpi] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [justSentNotice, setJustSentNotice] = useState(false);
   const [honeypot, setHoneypot] = useState('');
-
-  if (!isOpen) return null;
+  const [upiQrDataUrl, setUpiQrDataUrl] = useState('');
+  const isSubmittingRef = useRef(false);
 
   const newItems = items.filter((i) => !i.isSent);
   const sentItems = items.filter((i) => i.isSent);
@@ -80,25 +124,84 @@ export function BasketDrawer({
   );
   const grandTotal = newSubtotal + sentSubtotal;
 
+  const redemptionBase = newSubtotal > 0 ? newSubtotal : grandTotal;
+  const redemption = calculatePointsRedemption({
+    availablePoints: loyalty?.points ?? 0,
+    subtotal: redemptionBase,
+    settings,
+    redeemRequested: redeemPoints,
+  });
+
+  const netPayableTotal = Math.max(0, grandTotal - redemption.discountAmount);
+  const hasConfiguredUpi = isValidUpiId(settings.upiId);
+  const effectivePaymentMethod: PaymentMethod =
+    paymentMethod === 'upi' && hasConfiguredUpi && netPayableTotal > 0 ? 'upi' : 'cash';
+
+  const upiUri =
+    effectivePaymentMethod === 'upi'
+      ? buildUpiPaymentUri({
+          upiId: settings.upiId,
+          payeeName: settings.upiPayeeName || settings.cafeName,
+          amount: netPayableTotal,
+          orderNote: `${settings.cafeName} ${tableNumber.trim() || 'Dine-In Bill'}`,
+        })
+      : '';
+
+  useEffect(() => {
+    let active = true;
+    if (!isOpen || !upiUri) {
+      setUpiQrDataUrl('');
+      return;
+    }
+    void generateQrDataUrl(upiUri, 200)
+      .then((url) => {
+        if (active) setUpiQrDataUrl(url);
+      })
+      .catch(() => {
+        if (active) setUpiQrDataUrl('');
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, upiUri]);
+
+  if (!isOpen) return null;
+
+  const trimmedPhone = customerPhone.trim();
+  const phoneCheck =
+    trimmedPhone.length > 0
+      ? validateIndianMobileNumber(trimmedPhone)
+      : { valid: true, normalized: '', reason: undefined as string | undefined };
+
   const threshold = Math.max(1, Number(settings.highQuantityThreshold ?? 10));
   const highQty = detectHighQuantityItems(
     newItems.length > 0 ? newItems : items,
     threshold
   );
 
+  const checkoutExtras = {
+    pointsRedeemed: redemption.pointsToDeduct,
+    pointsDiscount: redemption.discountAmount,
+    paymentMethod: effectivePaymentMethod,
+    upiRefNote,
+    customerPhone: trimmedPhone,
+  };
+
   const whatsappUrl = buildWhatsappOrderUrl(
     settings,
     items,
     tableNumber,
     customerNote,
-    loyalty
+    loyalty,
+    checkoutExtras
   );
   const orderSummaryText = buildWhatsappOrderText(
     settings,
     items,
     tableNumber,
     customerNote,
-    loyalty
+    loyalty,
+    checkoutExtras
   );
 
   const handleCopySummary = async () => {
@@ -111,21 +214,48 @@ export function BasketDrawer({
     }
   };
 
+  const handleCopyUpiId = async () => {
+    const clean = normalizeUpiId(settings.upiId);
+    if (!clean) return;
+    try {
+      await navigator.clipboard.writeText(clean);
+      setCopiedUpi(true);
+      setTimeout(() => setCopiedUpi(false), 2000);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
+
   const isCafeOpen = settings.isCafeOpen !== false;
 
   const handleOrderOnWhatsapp = (e: MouseEvent<HTMLAnchorElement>) => {
-    // Block if cafe is closed or honeypot field is populated
-    if (!isCafeOpen || honeypot.trim().length > 0) {
+    // Block if cafe is closed, phone invalid, honeypot field populated, or rapid double-submit
+    if (
+      !isCafeOpen ||
+      !phoneCheck.valid ||
+      honeypot.trim().length > 0 ||
+      isSubmittingRef.current
+    ) {
       e.preventDefault();
       return;
     }
+    const capturedMeta: CheckoutSubmissionMeta = {
+      pointsRedeemed: redemption.pointsToDeduct,
+      pointsDiscount: redemption.discountAmount,
+      paymentMethod: effectivePaymentMethod,
+      upiRefNote: upiRefNote.trim(),
+    };
+    isSubmittingRef.current = true;
     // Allow the browser to read the pre-click href synchronously, then log & tick items as sent
     setTimeout(() => {
-      onRecordTableOrder();
+      onRecordTableOrder(capturedMeta);
       onMarkAllSent();
       setJustSentNotice(true);
       setTimeout(() => setJustSentNotice(false), 4500);
     }, 60);
+    setTimeout(() => {
+      isSubmittingRef.current = false;
+    }, 1500);
   };
 
   return (
@@ -466,6 +596,33 @@ export function BasketDrawer({
 
                 <div>
                   <label
+                    htmlFor="basket-phone"
+                    className="block text-xs font-semibold text-stone-700 mb-1"
+                  >
+                    Customer Mobile for WhatsApp Bill Receipt (Optional)
+                  </label>
+                  <div className="relative">
+                    <Phone className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="basket-phone"
+                      type="tel"
+                      inputMode="numeric"
+                      maxLength={14}
+                      value={customerPhone}
+                      onChange={(e) => onCustomerPhoneChange(e.target.value)}
+                      placeholder="10-digit mobile for digital receipt"
+                      className="w-full min-h-[44px] pl-9 pr-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                    />
+                  </div>
+                  {trimmedPhone.length > 0 && !phoneCheck.valid && (
+                    <p className="text-[11px] font-medium text-[#C83E2B] mt-1">
+                      {phoneCheck.reason || 'Enter a valid 10-digit Indian mobile number or leave blank.'}
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label
                     htmlFor="basket-note"
                     className="block text-xs font-semibold text-stone-700 mb-1"
                   >
@@ -502,7 +659,41 @@ export function BasketDrawer({
 
         {/* Sticky Checkout Footer */}
         {items.length > 0 && (
-          <div className="p-5 bg-white border-t border-stone-200 space-y-3">
+          <div className="p-5 bg-white border-t border-stone-200 space-y-3 max-h-[58vh] overflow-y-auto">
+            {settings.loyaltyEnabled !== false && loyalty && (
+              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-amber-50/90 border border-amber-200 text-xs">
+                <div className="min-w-0">
+                  <div className="font-bold text-stone-900 flex items-center gap-1.5">
+                    <Gift className="w-3.5 h-3.5 text-[#C83E2B] shrink-0" />
+                    <span className="tabular-nums">
+                      Points: {loyalty.points}/{redemption.thresholdPoints}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-stone-600 truncate">
+                    {redemption.eligible
+                      ? `Redeem ${redemption.thresholdPoints} pts for ₹${redemption.discountPerReward} instant discount`
+                      : `Need ${redemption.pointsShortfall} more pts to unlock ₹${redemption.discountPerReward} off`}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!redemption.eligible}
+                  onClick={() => onRedeemPointsChange(!redeemPoints)}
+                  className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                    redemption.canApply
+                      ? 'bg-[#15803D] text-white'
+                      : redemption.eligible
+                      ? 'bg-stone-900 hover:bg-stone-800 text-white'
+                      : 'bg-stone-200 text-stone-500 cursor-not-allowed'
+                  }`}
+                >
+                  {redemption.canApply
+                    ? `Applied (-₹${redemption.discountAmount})`
+                    : 'Redeem Points'}
+                </button>
+              </div>
+            )}
+
             {(sentCount > 0 || newCount > 0) && (
               <div className="space-y-1 text-xs text-stone-600 pb-2 border-b border-stone-100">
                 <div className="flex items-center justify-between">
@@ -519,17 +710,113 @@ export function BasketDrawer({
                     </span>
                   </div>
                 )}
+                {redemption.discountAmount > 0 && (
+                  <div className="flex items-center justify-between text-[#15803D] font-semibold">
+                    <span>🎁 Points Discount ({redemption.pointsToDeduct} pts)</span>
+                    <span className="tabular-nums">-₹{redemption.discountAmount}</span>
+                  </div>
+                )}
               </div>
             )}
 
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium text-stone-600">
-                Full Session Bill Total
+                {redemption.discountAmount > 0 ? 'Net Payable Bill' : 'Full Session Bill Total'}
               </span>
               <span className="font-display text-2xl font-bold text-stone-900 tabular-nums">
-                ₹{grandTotal}
+                ₹{netPayableTotal}
               </span>
             </div>
+
+            {netPayableTotal > 0 && (
+              <div className="space-y-2 pt-0.5">
+                {hasConfiguredUpi ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-1.5 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => onPaymentMethodChange('cash')}
+                        className={`min-h-[36px] px-3 py-1.5 rounded-xl border font-semibold transition-colors ${
+                          effectivePaymentMethod === 'cash'
+                            ? 'bg-stone-900 text-white border-stone-900'
+                            : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                        }`}
+                      >
+                        Pay Cash / Counter
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onPaymentMethodChange('upi')}
+                        className={`min-h-[36px] px-3 py-1.5 rounded-xl border font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                          effectivePaymentMethod === 'upi'
+                            ? 'bg-[#15803D] text-white border-[#15803D]'
+                            : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                        }`}
+                      >
+                        <QrCode className="w-3.5 h-3.5" />
+                        <span>Pay via UPI QR</span>
+                      </button>
+                    </div>
+
+                    {effectivePaymentMethod === 'upi' && (
+                      <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2.5 text-xs">
+                        <div className="flex items-center gap-3">
+                          {upiQrDataUrl && (
+                            <img
+                              src={upiQrDataUrl}
+                              alt={`UPI QR for ₹${netPayableTotal}`}
+                              className="w-24 h-24 rounded-lg border border-stone-200 bg-white p-1 shrink-0"
+                            />
+                          )}
+                          <div className="min-w-0 space-y-1.5 flex-1">
+                            <div className="font-bold text-stone-900 tabular-nums">
+                              Scan &amp; Pay ₹{netPayableTotal}
+                            </div>
+                            <div className="text-[11px] font-mono text-stone-700 break-all">
+                              {normalizeUpiId(settings.upiId)}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {upiUri && (
+                                <a
+                                  href={upiUri}
+                                  className="px-2.5 py-1 rounded-lg bg-[#15803D] hover:bg-[#166534] text-white text-[11px] font-semibold inline-flex items-center gap-1"
+                                >
+                                  <Smartphone className="w-3 h-3" />
+                                  <span>Open UPI App</span>
+                                </a>
+                              )}
+                              <button
+                                type="button"
+                                onClick={handleCopyUpiId}
+                                className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-semibold text-stone-800 inline-flex items-center gap-1"
+                              >
+                                <Copy className="w-3 h-3" />
+                                <span>{copiedUpi ? 'Copied UPI' : 'Copy UPI ID'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <input
+                          type="text"
+                          maxLength={40}
+                          value={upiRefNote}
+                          onChange={(e) => onUpiRefNoteChange(e.target.value)}
+                          placeholder="Optional UTR / UPI Ref No. after paying"
+                          className="w-full min-h-[36px] px-2.5 py-1.5 rounded-lg border border-stone-200 bg-white text-xs text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#15803D]"
+                        />
+                        <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 leading-snug">
+                          Order will show <span className="font-semibold">Pending Verification</span> until Cafe staff confirms real UPI receipt.
+                        </p>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-[11px] text-stone-500">
+                    Payment: Pay Cash / Counter (UPI QR can be enabled in Cafe Admin Settings).
+                  </p>
+                )}
+              </div>
+            )}
 
             {!isCafeOpen && (
               <div className="px-3.5 py-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-[#C83E2B] flex items-start gap-2">
@@ -552,6 +839,14 @@ export function BasketDrawer({
               >
                 <Store className="w-4 h-4" />
                 <span>Cafe Currently Closed — Orders Paused</span>
+              </button>
+            ) : !phoneCheck.valid ? (
+              <button
+                type="button"
+                disabled
+                className="w-full min-h-[48px] px-5 py-3 rounded-xl bg-stone-200 text-stone-600 font-semibold text-sm flex items-center justify-center gap-2 cursor-not-allowed"
+              >
+                <span>Enter valid 10-digit mobile above or leave blank</span>
               </button>
             ) : (
               <a
