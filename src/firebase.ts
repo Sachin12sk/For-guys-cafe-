@@ -70,6 +70,8 @@ export const SHARED_FIREBASE_SYNC_CONTRACT = {
     storeCatalog: 'store/catalog',
     orders: 'orders',
     customers: 'customers',
+    customerProfiles: 'customerProfiles',
+    customerProfileLookup: 'customerProfileLookup',
     reviews: 'reviews',
     vibeSnaps: 'vibeSnaps',
     referrals: 'referrals',

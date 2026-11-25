@@ -24,6 +24,7 @@ import {
 import type {
   CafeSettings,
   CartItem,
+  CustomerProfile,
   HomeOrderDetails,
   LoyaltyState,
   PaymentMethod,
@@ -64,6 +65,8 @@ interface HomeOrderDrawerProps {
   items: CartItem[];
   settings: CafeSettings;
   details: HomeOrderDetails;
+  savedProfile?: CustomerProfile | null;
+  onOpenEditProfile?: () => void;
   savedGmails: string[];
   loadedProfileGmail: string | null;
   lastOrderAt: number | null;
@@ -98,6 +101,8 @@ export function HomeOrderDrawer({
   items,
   settings,
   details,
+  savedProfile,
+  onOpenEditProfile,
   savedGmails,
   loadedProfileGmail,
   lastOrderAt,
@@ -210,7 +215,8 @@ export function HomeOrderDrawer({
   if (!isOpen) return null;
 
   const trimmedGmail = details.gmail.trim();
-  const hasValidGmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedGmail);
+  const hasValidGmail =
+    trimmedGmail === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedGmail);
   const nameCheck = validateCustomerName(details.customerName);
   const phoneCheck = validateIndianMobileNumber(details.alternatePhone);
   const splitLoc = splitLegacyWardArea(
@@ -222,11 +228,11 @@ export function HomeOrderDrawer({
   const areaValue = details.area !== undefined ? details.area : splitLoc.area;
   const deliveryAddressValue = details.deliveryAddress || '';
   const safeGeoUrl = sanitizeGpsLocationUrl(details.geoLocationUrl);
-  const hasLocation =
-    deliveryAddressValue.trim().length > 0 ||
-    areaValue.trim().length > 0 ||
-    details.wardArea.trim().length > 0 ||
-    safeGeoUrl.length > 0;
+  const hasValidWard = wardValue.trim().length >= 1;
+  const hasValidArea = areaValue.trim().length >= 2;
+  const hasValidDeliveryAddress =
+    deliveryAddressValue.trim().length >= 5 || safeGeoUrl.length > 0;
+  const hasLocation = hasValidWard && hasValidArea && hasValidDeliveryAddress;
 
   const threshold = Math.max(1, Number(settings.highQuantityThreshold ?? 10));
   const highQty = detectHighQuantityItems(selectedItems, threshold);
@@ -412,7 +418,7 @@ export function HomeOrderDrawer({
           <div className="px-5 py-3 bg-[#15803D] text-white text-xs font-semibold flex items-start gap-2 shrink-0">
             <Check className="w-4 h-4 shrink-0 mt-0.5" />
             <span>
-              Order Sent to WhatsApp &amp; saved to your Gmail profile! Reminder: No Return Policy applies once preparation starts.
+              Order Sent to WhatsApp &amp; saved to your profile! Reminder: No Return Policy applies once preparation starts.
             </span>
           </div>
         )}
@@ -425,28 +431,38 @@ export function HomeOrderDrawer({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          {/* Fast Home Order Details & Gmail Lookup Form (Always accessible) */}
+          {/* Customer Profile Auto-Fill & Delivery Details Form */}
           <div className="p-4 rounded-2xl bg-white border border-stone-200/80 space-y-3.5">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="text-xs font-bold text-stone-900 uppercase tracking-wider">
-                Customer Gmail &amp; Delivery Details
+                Customer &amp; Delivery Details
               </div>
-              {loadedProfileGmail && (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#15803D]">
-                  <UserCheck className="w-3.5 h-3.5" />
-                  <span>Saved Profile Loaded</span>
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                {(savedProfile || loadedProfileGmail) && (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#15803D]">
+                    <UserCheck className="w-3.5 h-3.5" />
+                    <span>Saved Profile Loaded</span>
+                  </span>
+                )}
+                {onOpenEditProfile && (
+                  <button
+                    type="button"
+                    onClick={onOpenEditProfile}
+                    className="text-[11px] font-semibold text-[#C83E2B] hover:underline"
+                  >
+                    Edit Profile
+                  </button>
+                )}
+              </div>
             </div>
 
-
-            {/* Gmail Field */}
+            {/* Gmail Field (Optional) */}
             <div className="space-y-1.5">
               <label
                 htmlFor="home-customer-gmail"
                 className="block text-xs font-semibold text-stone-700"
               >
-                Gmail Address *
+                Gmail Address (Optional)
               </label>
               <div className="relative">
                 <Mail className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -456,10 +472,19 @@ export function HomeOrderDrawer({
                   autoComplete="email"
                   value={details.gmail}
                   onChange={(e) => onGmailChange(e.target.value)}
-                  placeholder="e.g. rahul@gmail.com"
-                  className="w-full min-h-[44px] pl-9 pr-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                  placeholder="Optional e.g. rahul@gmail.com"
+                  className={`w-full min-h-[44px] pl-9 pr-3 py-2 rounded-xl border bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white ${
+                    trimmedGmail.length > 0 && !hasValidGmail
+                      ? 'border-[#C83E2B]'
+                      : 'border-stone-200'
+                  }`}
                 />
               </div>
+              {trimmedGmail.length > 0 && !hasValidGmail && (
+                <p className="text-[11px] text-[#C83E2B] font-medium">
+                  Enter a valid Gmail address or leave this field blank.
+                </p>
+              )}
 
               {savedGmails.length > 0 && (
                 <div className="pt-1 space-y-1">
@@ -494,9 +519,10 @@ export function HomeOrderDrawer({
                   Welcome back{details.customerName ? `, ${details.customerName}` : ''}! Your saved address &amp; last order items are loaded below — edit, check/uncheck, or add more items.
                 </p>
               ) : (
+                trimmedGmail.length > 0 &&
                 hasValidGmail && (
                   <p className="text-[11px] text-stone-500 leading-snug pt-0.5">
-                    New Gmail on this browser — enter your details below and we’ll save them for faster repeat orders.
+                    Gmail noted for optional repeat-order lookup on this browser.
                   </p>
                 )
               )}
@@ -584,7 +610,7 @@ export function HomeOrderDrawer({
                     htmlFor="home-ward-input"
                     className="block text-xs font-semibold text-stone-700 mb-1"
                   >
-                    Ward (वार्ड)
+                    Ward Number *
                   </label>
                   <input
                     id="home-ward-input"
@@ -604,8 +630,15 @@ export function HomeOrderDrawer({
                       });
                     }}
                     placeholder="e.g. Ward 7"
-                    className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                    className={`w-full min-h-[42px] px-3 py-2 rounded-xl border bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white ${
+                      !hasValidWard ? 'border-[#C83E2B]/70' : 'border-stone-200'
+                    }`}
                   />
+                  {!hasValidWard && (
+                    <p className="text-[11px] text-[#C83E2B] font-medium mt-1">
+                      Enter Ward Number (e.g. Ward 4).
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -633,8 +666,15 @@ export function HomeOrderDrawer({
                       });
                     }}
                     placeholder="e.g. Kakawan Road, Bilhaur"
-                    className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                    className={`w-full min-h-[42px] px-3 py-2 rounded-xl border bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white ${
+                      !hasValidArea ? 'border-[#C83E2B]/70' : 'border-stone-200'
+                    }`}
                   />
+                  {!hasValidArea && (
+                    <p className="text-[11px] text-[#C83E2B] font-medium mt-1">
+                      Enter Area / Mohalla name.
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -691,11 +731,19 @@ export function HomeOrderDrawer({
                     })
                   }
                   placeholder="House / Shop No., Gali / Street, Near Landmark, Bilhaur"
-                  className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white resize-none"
+                  className={`w-full px-3 py-2 rounded-xl border bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white resize-none ${
+                    !hasValidDeliveryAddress ? 'border-[#C83E2B]/70' : 'border-stone-200'
+                  }`}
                 />
-                <p className="text-[11px] text-stone-500 mt-1">
-                  GPS बंद या Permission न होने पर भी आप यहाँ अपना पूरा पता लिखकर आसानी से ऑर्डर कर सकते हैं।
-                </p>
+                {!hasValidDeliveryAddress ? (
+                  <p className="text-[11px] text-[#C83E2B] font-medium mt-1">
+                    Enter your Full Delivery Address (house/shop/street &amp; landmark) or pin GPS below.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-stone-500 mt-1">
+                    GPS बंद या Permission न होने पर भी आप यहाँ अपना पूरा पता लिखकर आसानी से ऑर्डर कर सकते हैं।
+                  </p>
+                )}
               </div>
 
               <div className="pt-0.5 flex flex-wrap items-center gap-2">
@@ -1227,13 +1275,17 @@ export function HomeOrderDrawer({
               >
                 <span>
                   {!hasValidGmail
-                    ? 'Enter a valid Gmail above to order'
+                    ? 'Enter a valid Gmail above or leave blank'
                     : !nameCheck.valid
-                    ? nameCheck.reason || 'Enter Your Name above to order'
+                    ? nameCheck.reason || 'Enter Customer Name above to order'
                     : !phoneCheck.valid
                     ? phoneCheck.reason || 'Enter a valid 10-digit mobile number'
-                    : !hasLocation
-                    ? 'Enter Delivery Address / Area above'
+                    : !hasValidWard
+                    ? 'Enter Ward Number above to order'
+                    : !hasValidArea
+                    ? 'Enter Area / Mohalla above to order'
+                    : !hasValidDeliveryAddress
+                    ? 'Enter Full Delivery Address above to order'
                     : 'Confirm No Return Policy checkbox above'}
                 </span>
               </button>

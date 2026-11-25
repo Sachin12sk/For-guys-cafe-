@@ -39,6 +39,39 @@ export function getActiveOrderPlatform(): OrderPlatform {
   return isCapacitorAndroid() ? 'android' : 'web';
 }
 
+interface FourGuysNativePrefsBridge {
+  getProfileId?: () => string;
+  setProfileId?: (profileId: string) => void;
+}
+
+export function readNativeBackupProfileId(): string | null {
+  try {
+    if (typeof window === 'undefined') return null;
+    const bridge = (
+      window as unknown as { FourGuysNativePrefs?: FourGuysNativePrefsBridge }
+    ).FourGuysNativePrefs;
+    const raw = bridge?.getProfileId?.();
+    if (typeof raw === 'string' && raw.trim().length > 0) {
+      return raw.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeNativeBackupProfileId(profileId: string | null): void {
+  try {
+    if (typeof window === 'undefined') return;
+    const bridge = (
+      window as unknown as { FourGuysNativePrefs?: FourGuysNativePrefsBridge }
+    ).FourGuysNativePrefs;
+    bridge?.setProfileId?.(profileId ? profileId.trim() : '');
+  } catch {
+    // Optional outside Android WebView
+  }
+}
+
 let nativeShellInitialized = false;
 
 export async function initNativeAndroidShell(): Promise<void> {

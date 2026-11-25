@@ -27,6 +27,9 @@ export interface CheckoutExtrasOptions {
   paymentMethod?: PaymentMethod;
   upiRefNote?: string;
   customerPhone?: string;
+  customerName?: string;
+  ward?: string;
+  area?: string;
 }
 
 export function sanitizeWhatsappNumber(raw: string): string {
@@ -156,8 +159,18 @@ export function buildWhatsappOrderText(
       : 'Table / Type: Counter / QR Order',
   ];
 
+  if (extras?.customerName?.trim()) {
+    lines.push(`Customer: ${extras.customerName.trim()}`);
+  }
   if (extras?.customerPhone?.trim()) {
     lines.push(`Customer Mobile (Receipt): ${extras.customerPhone.trim()}`);
+  }
+  const dineInWardArea = composeWardAreaLabel({
+    ward: extras?.ward,
+    area: extras?.area,
+  });
+  if (dineInWardArea) {
+    lines.push(`Ward / Area: ${dineInWardArea}`);
   }
   lines.push('------------------------');
 
@@ -520,8 +533,19 @@ export function buildTableReceiptText(
     `Date & Time: ${formatOrderTimestamp(order.timestamp)}`,
   ];
 
+  if (order.customerName?.trim()) {
+    lines.push(`Customer: ${order.customerName.trim()}`);
+  }
   if (order.customerPhone?.trim()) {
     lines.push(`Customer Mobile: ${order.customerPhone.trim()}`);
+  }
+  const tableWardArea = composeWardAreaLabel({
+    ward: order.ward,
+    area: order.area,
+    wardArea: order.wardArea,
+  });
+  if (tableWardArea) {
+    lines.push(`Ward / Area: ${tableWardArea}`);
   }
 
   lines.push('------------------------');

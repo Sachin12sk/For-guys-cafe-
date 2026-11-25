@@ -203,7 +203,9 @@ export function downloadTableOrdersCsv(tableOrders: TableOrderRecord[]): void {
     'Date & Time',
     'Order Status',
     'Table / Counter',
+    'Customer Name',
     'Customer Phone',
+    'Ward / Area',
     'Items Ordered',
     'Points Discount (INR)',
     'Order Amount (INR)',
@@ -228,12 +230,15 @@ export function downloadTableOrdersCsv(tableOrders: TableOrderRecord[]): void {
         return `${i.quantity}x ${i.name}${comboInfo} (Rs ${i.subtotal})`;
       })
       .join(' | ');
+    const wardAreaLabel = composeWardAreaLabel(order);
     rows.push([
       order.orderCode,
       formatOrderTimestamp(order.timestamp),
       order.orderStatus || 'pending',
       order.tableNumber || 'Counter / QR Order',
+      order.customerName || '-',
       order.customerPhone || '-',
+      wardAreaLabel || '-',
       itemsText,
       order.pointsDiscount ?? 0,
       order.newOrderAmount,
@@ -407,14 +412,17 @@ export function downloadAdminPdfReport(
       const flagPart = order.isFlagged
         ? ` [FLAGGED: ${order.flagReason || 'Verify Quantity'}]`
         : '';
+      const namePart = order.customerName ? ` | ${order.customerName}` : '';
       const phonePart = order.customerPhone ? ` | Mobile: ${order.customerPhone}` : '';
+      const wardAreaLabel = composeWardAreaLabel(order);
+      const areaPart = wardAreaLabel ? ` | ${wardAreaLabel}` : '';
       const payPart =
         order.paymentStatus === 'paid'
           ? ' [PAID]'
           : order.paymentMethod === 'upi'
           ? ' [UPI Pending]'
           : ' [Cash]';
-      const line = `${order.orderCode}${flagPart}${payPart} | ${formatOrderTimestamp(order.timestamp)} | ${order.tableNumber || 'Counter'}${phonePart} | Order: Rs. ${order.newOrderAmount} (Session: Rs. ${order.sessionTotalAmount}) | Items: ${itemsSummary}`;
+      const line = `${order.orderCode}${flagPart}${payPart} | ${formatOrderTimestamp(order.timestamp)} | ${order.tableNumber || 'Counter'}${namePart}${phonePart}${areaPart} | Order: Rs. ${order.newOrderAmount} (Session: Rs. ${order.sessionTotalAmount}) | Items: ${itemsSummary}`;
       const wrapped = doc.splitTextToSize(line, maxLineWidth);
       ensureSpace(wrapped.length * 12 + 6);
       doc.text(wrapped, margin, y);

@@ -56,6 +56,19 @@ service cloud.firestore {
       );
     }
 
+    function isValidCustomerProfileCapabilityId(profileId) {
+      return profileId is string &&
+        profileId.size() >= 20 &&
+        profileId.size() <= 80 &&
+        profileId.matches('^custprof_[a-zA-Z0-9_\\-]{16,64}$');
+    }
+
+    function isValidProfileLookupId(lookupId) {
+      return lookupId is string &&
+        lookupId.size() == 68 &&
+        lookupId.matches('^cpl_[a-f0-9]{64}$');
+    }
+
     function isValidGpsUrl(url) {
       return url is string &&
         url.size() <= 250 &&
@@ -114,6 +127,63 @@ service cloud.firestore {
         data.customerNote is string &&
         data.customerNote.size() <= 300 &&
         data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidGuestCustomerProfile(data, profileId) {
+      return data.keys().hasAll([
+          'profileId',
+          'customerName',
+          'phone',
+          'ward',
+          'area',
+          'wardArea',
+          'sourcePlatform',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'profileId',
+          'customerName',
+          'phone',
+          'ward',
+          'area',
+          'wardArea',
+          'deliveryAddress',
+          'gmail',
+          'sourcePlatform',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.profileId is string &&
+        data.profileId == profileId &&
+        data.customerName is string &&
+        data.customerName.size() >= 2 &&
+        data.customerName.size() <= 80 &&
+        data.phone is string &&
+        data.phone.size() == 10 &&
+        data.phone.matches('^[6-9][0-9]{9}$') &&
+        data.ward is string &&
+        data.ward.size() >= 1 &&
+        data.ward.size() <= 60 &&
+        data.area is string &&
+        data.area.size() >= 2 &&
+        data.area.size() <= 100 &&
+        data.wardArea is string &&
+        data.wardArea.size() <= 120 &&
+        (!('deliveryAddress' in data) || (data.deliveryAddress is string && data.deliveryAddress.size() <= 250)) &&
+        (!('gmail' in data) || (data.gmail is string && data.gmail.size() <= 120)) &&
+        isValidSourcePlatform(data.sourcePlatform) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCustomerProfileLookup(data, lookupId) {
+      return data.keys().hasAll(['lookupId', 'profileId', 'updatedAt']) &&
+        data.keys().hasOnly(['lookupId', 'profileId', 'updatedAt']) &&
+        data.lookupId is string &&
+        data.lookupId == lookupId &&
+        isValidCustomerProfileCapabilityId(data.profileId) &&
         data.updatedAt is timestamp;
     }
 
@@ -215,6 +285,7 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'customerUid',
+          'profileId',
           'verifiedPhone',
           'orderCode',
           'orderMode',
@@ -254,10 +325,16 @@ service cloud.firestore {
         data.customerUid.size() >= 1 &&
         data.customerUid.size() <= 128 &&
         data.customerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        (!('profileId' in data) || data.profileId == '' || isValidCustomerProfileCapabilityId(data.profileId)) &&
         data.verifiedPhone is string &&
-        data.verifiedPhone.size() >= 8 &&
-        data.verifiedPhone.size() <= 20 &&
-        data.verifiedPhone.matches('^\\+[1-9][0-9]{7,14}$') &&
+        (
+          data.verifiedPhone == '' ||
+          (
+            data.verifiedPhone.size() >= 8 &&
+            data.verifiedPhone.size() <= 20 &&
+            data.verifiedPhone.matches('^\\+[1-9][0-9]{7,14}$')
+          )
+        ) &&
         data.orderCode is string &&
         data.orderCode.size() >= 3 &&
         data.orderCode.size() <= 32 &&
@@ -668,7 +745,57 @@ service cloud.firestore {
       }
     }
 
-    // Verified customer order feed for Cafe Admin (isolated per customer, readable by Admin)
+    // Capability-scoped Zero-OTP Customer Profiles (strictly un-listable; no cross-customer PII leaks)
+    match /customerProfiles/{profileId} {
+      allow get: if isAdmin() || isValidCustomerProfileCapabilityId(profileId);
+      allow list: if isAdmin();
+
+      allow create: if isValidCustomerProfileCapabilityId(profileId) &&
+        isValidGuestCustomerProfile(incoming(), profileId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isValidCustomerProfileCapabilityId(profileId) &&
+        isValidGuestCustomerProfile(incoming(), profileId) &&
+        incoming().profileId == existing().profileId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'customerName',
+            'phone',
+            'ward',
+            'area',
+            'wardArea',
+            'deliveryAddress',
+            'gmail',
+            'sourcePlatform',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    // Zero-PII Salted SHA-256 Lookup for Reinstall Recovery (strictly unlistable, immutable profileId link)
+    match /customerProfileLookup/{lookupId} {
+      allow get: if isAdmin() || isValidProfileLookupId(lookupId);
+      allow list: if isAdmin();
+
+      allow create: if isValidProfileLookupId(lookupId) &&
+        isValidCustomerProfileLookup(incoming(), lookupId) &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isValidProfileLookupId(lookupId) &&
+        isValidCustomerProfileLookup(incoming(), lookupId) &&
+        incoming().lookupId == existing().lookupId &&
+        incoming().profileId == existing().profileId &&
+        incoming().updatedAt == request.time;
+
+      allow delete: if isAdmin();
+    }
+
+    // Customer order feed for Cafe Admin (zero-OTP guest checkout + Admin-only listing; prevents cross-customer PII reads)
     match /orders/{orderId} {
       allow get: if isValidId(orderId) && (
         isAdmin() ||
@@ -677,17 +804,25 @@ service cloud.firestore {
       allow list: if isAdmin() || (isSignedIn() && existing().customerUid == request.auth.uid);
 
       allow create: if isValidId(orderId) &&
-        isVerifiedPhoneUser() &&
         isValidCloudOrder(incoming()) &&
         incoming().keys().hasAll(['ward', 'area', 'deliveryAddress']) &&
-        incoming().customerUid == request.auth.uid &&
-        incoming().verifiedPhone == request.auth.token.phone_number &&
         (!('orderStatus' in incoming()) || incoming().orderStatus == 'pending') &&
         (!('paymentStatus' in incoming()) || incoming().paymentStatus in ['unpaid', 'pending_verification']) &&
         !('paymentVerifiedAt' in incoming()) &&
-        incoming().createdAt == request.time &&
-        exists(/databases/$(database)/documents/customers/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/customers/$(request.auth.uid)).data.uid == request.auth.uid;
+        incoming().createdAt == request.time && (
+          (
+            isVerifiedPhoneUser() &&
+            incoming().customerUid == request.auth.uid &&
+            incoming().verifiedPhone == request.auth.token.phone_number &&
+            exists(/databases/$(database)/documents/customers/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/customers/$(request.auth.uid)).data.uid == request.auth.uid
+          ) ||
+          (
+            (incoming().customerUid == 'guest' || isValidCustomerProfileCapabilityId(incoming().customerUid)) &&
+            incoming().customerName.size() >= 2 &&
+            incoming().alternatePhone.matches('^[6-9][0-9]{9}$')
+          )
+        );
 
       allow update: if isValidId(orderId) &&
         isAdmin() &&

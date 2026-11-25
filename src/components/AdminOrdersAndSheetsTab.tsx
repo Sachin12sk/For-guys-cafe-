@@ -15,6 +15,7 @@ import {
   Minus,
   RotateCcw,
   MessageCircle,
+  Phone,
   Cloud,
   Search,
 } from 'lucide-react';
@@ -48,6 +49,7 @@ import {
   buildHomeReceiptWhatsappUrl,
   buildTableReceiptWhatsappUrl,
 } from '../utils/whatsapp';
+import { buildCustomerTelUrl } from '../services/customerAuth';
 import {
   composeWardAreaLabel,
   isValidGpsMapsUrl,
@@ -258,7 +260,7 @@ export function AdminOrdersAndSheetsTab({
               <div className="font-bold text-stone-900">
                 {adminCloudEmail
                   ? `Firebase Live Cloud Sync Active (${adminCloudEmail})`
-                  : 'OTP Customer Cloud Orders & Live Catalog Sync (Separate Admin Auth)'}
+                  : 'Customer Cloud Orders & Live Catalog Sync (Separate Admin Auth)'}
               </div>
               <div className="text-stone-600 mt-0.5">
                 {adminCloudEmail
@@ -548,7 +550,7 @@ export function AdminOrdersAndSheetsTab({
                           <span>{order.orderCode}</span>
                           {order.source === 'cloud' && (
                             <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-900 text-[10px] font-sans font-bold">
-                              OTP Cloud
+                              Cloud Order
                             </span>
                           )}
                           {order.sourcePlatform === 'android' && (
@@ -733,6 +735,20 @@ export function AdminOrdersAndSheetsTab({
                               {order.paymentStatus === 'paid' ? 'Mark Unpaid' : 'Confirm Paid'}
                             </button>
                           )}
+                          {(() => {
+                            const telUrl = buildCustomerTelUrl(order.alternatePhone);
+                            return telUrl ? (
+                              <a
+                                href={telUrl}
+                                title={`Call ${order.customerName} (${order.alternatePhone})`}
+                                aria-label={`Call ${order.customerName} for ${order.orderCode}`}
+                                className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-800 text-[11px] font-semibold inline-flex items-center gap-1 transition-colors"
+                              >
+                                <Phone className="w-3 h-3 shrink-0 text-[#15803D]" />
+                                <span>Call</span>
+                              </a>
+                            ) : null;
+                          })()}
                           <a
                             href={buildHomeReceiptWhatsappUrl(settings, order)}
                             target="_blank"
@@ -827,7 +843,7 @@ export function AdminOrdersAndSheetsTab({
                           <span>{order.orderCode}</span>
                           {order.source === 'cloud' && (
                             <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-900 text-[10px] font-sans font-bold">
-                              OTP Cloud
+                              Cloud Order
                             </span>
                           )}
                           {order.sourcePlatform === 'android' && (
@@ -883,13 +899,23 @@ export function AdminOrdersAndSheetsTab({
                       <td className="py-3 px-3 text-stone-500 whitespace-nowrap tabular-nums">
                         {formatOrderTimestamp(order.timestamp)}
                       </td>
-                      <td className="py-3 px-3 whitespace-nowrap">
-                        <div className="font-semibold text-stone-900">
+                      <td className="py-3 px-3">
+                        <div className="font-semibold text-stone-900 whitespace-nowrap">
                           {order.tableNumber || 'Counter / QR'}
                         </div>
+                        {order.customerName && (
+                          <div className="font-medium text-stone-800 mt-0.5">
+                            {order.customerName}
+                          </div>
+                        )}
                         {order.customerPhone && (
                           <div className="text-[11px] text-stone-600 tabular-nums mt-0.5">
                             {order.customerPhone}
+                          </div>
+                        )}
+                        {composeWardAreaLabel(order) && (
+                          <div className="text-[11px] text-stone-500 mt-0.5">
+                            {composeWardAreaLabel(order)}
                           </div>
                         )}
                       </td>
@@ -985,6 +1011,20 @@ export function AdminOrdersAndSheetsTab({
                               {order.paymentStatus === 'paid' ? 'Mark Unpaid' : 'Confirm Paid'}
                             </button>
                           )}
+                          {(() => {
+                            const telUrl = buildCustomerTelUrl(order.customerPhone);
+                            return telUrl ? (
+                              <a
+                                href={telUrl}
+                                title={`Call ${order.customerName || 'Guest'} (${order.customerPhone})`}
+                                aria-label={`Call customer for ${order.orderCode}`}
+                                className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-800 text-[11px] font-semibold inline-flex items-center gap-1 transition-colors"
+                              >
+                                <Phone className="w-3 h-3 shrink-0 text-[#15803D]" />
+                                <span>Call</span>
+                              </a>
+                            ) : null;
+                          })()}
                           <a
                             href={buildTableReceiptWhatsappUrl(settings, order)}
                             target="_blank"

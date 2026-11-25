@@ -33,6 +33,7 @@ const KEY_HUMAN_LABELS: Record<string, string> = {
   four_guys_cafe_home_orders_v1: 'Home Order Logs',
   four_guys_cafe_table_orders_v1: 'Table Order Logs',
   four_guys_cafe_home_profiles_v1: 'Saved Customer Profiles',
+  four_guys_cafe_customer_profile_v1: 'Customer Profile',
   four_guys_cafe_ratings_v1: 'Customer Reviews',
   four_guys_cafe_referrals_v1: 'Referral Ledger',
 };

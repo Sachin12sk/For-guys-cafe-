@@ -20,6 +20,7 @@ import type {
   CafeRatingRecord,
   CafeSettings,
   CafeStoreData,
+  CustomerProfile,
   OrderPlatform,
   OrderStatus,
   ReferralRecord,
@@ -30,7 +31,22 @@ import {
   sanitizeSettingsForExport,
   type SanitizedMenuExport,
 } from '../utils/storage';
-import type { SaveCloudOrderInput } from './customerAuth';
+import {
+  buildDeterministicOrderDocId,
+  formatItemsForCloudOrder,
+  getInitialCustomerPaymentStatus,
+  sanitizeCustomerPaymentMethod,
+  type SaveCloudOrderInput,
+} from './customerAuth';
+import {
+  computeProfileLookupId,
+  isValidCustomerProfileId,
+  normalizeAreaInput,
+  normalizeStoredCustomerProfile,
+  normalizeWardInput,
+} from '../utils/customerProfile';
+import { composeWardAreaLabel, sanitizeGpsLocationUrl } from '../utils/location';
+import { validateIndianMobileNumber } from '../utils/security';
 
 export const PENDING_CLOUD_SYNC_STORAGE_KEY = 'four_guys_cafe_pending_sync_v1';
 
@@ -494,10 +510,265 @@ export function subscribeAdminCloudReferrals(
 }
 
 // =========================================================================
+// Zero-OTP Shared Customer Profile & Guest Cloud Orders (Web + Android)
+// =========================================================================
+
+export async function fetchCloudCustomerProfile(
+  profileId: string
+): Promise<CustomerProfile | null> {
+  if (!isValidCustomerProfileId(profileId)) return null;
+  try {
+    const snap = await getDoc(doc(db, 'customerProfiles', profileId));
+    if (!snap.exists()) return null;
+    const d = snap.data();
+    return normalizeStoredCustomerProfile({
+      profileId: d.profileId || snap.id,
+      customerName: d.customerName,
+      phone: d.phone,
+      ward: d.ward,
+      area: d.area,
+      wardArea: d.wardArea,
+      deliveryAddress: d.deliveryAddress,
+      gmail: d.gmail,
+      sourcePlatform: d.sourcePlatform,
+      createdAt: toIsoString(d.createdAt),
+      updatedAt: toIsoString(d.updatedAt),
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function lookupCloudCustomerProfileByIdentity(
+  phone: string,
+  customerName: string,
+  ward: string,
+  area: string
+): Promise<CustomerProfile | null> {
+  const phoneCheck = validateIndianMobileNumber(phone);
+  const cleanName = customerName.trim();
+  const cleanWard = normalizeWardInput(ward);
+  const cleanArea = normalizeAreaInput(area);
+  if (
+    !phoneCheck.valid ||
+    cleanName.length < 2 ||
+    cleanWard.length < 1 ||
+    cleanArea.length < 2
+  ) {
+    return null;
+  }
+  try {
+    const lookupId = computeProfileLookupId(
+      phoneCheck.normalized,
+      cleanName,
+      cleanWard,
+      cleanArea
+    );
+    const lookupSnap = await getDoc(doc(db, 'customerProfileLookup', lookupId));
+    if (!lookupSnap.exists()) return null;
+    const profileId = String(lookupSnap.data()?.profileId || '');
+    if (!isValidCustomerProfileId(profileId)) return null;
+    return await fetchCloudCustomerProfile(profileId);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveCloudCustomerProfile(
+  profile: CustomerProfile
+): Promise<void> {
+  if (!isValidCustomerProfileId(profile.profileId)) {
+    throw new Error('Invalid customer profile identifier.');
+  }
+
+  const phoneCheck = validateIndianMobileNumber(profile.phone);
+  if (!phoneCheck.valid) {
+    throw new Error(phoneCheck.reason || 'Valid 10-digit mobile number required.');
+  }
+
+  const ward = profile.ward.trim().slice(0, 60);
+  const area = profile.area.trim().slice(0, 100);
+  const wardArea = composeWardAreaLabel({
+    ward,
+    area,
+    wardArea: profile.wardArea,
+  });
+
+  const profileRef = doc(db, 'customerProfiles', profile.profileId);
+  const existingSnap = await getDoc(profileRef).catch(() => null);
+
+  const sharedFields = {
+    profileId: profile.profileId,
+    customerName: profile.customerName.trim().slice(0, 80),
+    phone: phoneCheck.normalized,
+    ward,
+    area,
+    wardArea,
+    deliveryAddress: (profile.deliveryAddress || '').trim().slice(0, 250),
+    gmail: (profile.gmail || '').trim().toLowerCase().slice(0, 120),
+    sourcePlatform: (profile.sourcePlatform === 'android' ? 'android' : 'web') as OrderPlatform,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (existingSnap && existingSnap.exists()) {
+    await updateDoc(profileRef, {
+      customerName: sharedFields.customerName,
+      phone: sharedFields.phone,
+      ward: sharedFields.ward,
+      area: sharedFields.area,
+      wardArea: sharedFields.wardArea,
+      deliveryAddress: sharedFields.deliveryAddress,
+      gmail: sharedFields.gmail,
+      sourcePlatform: sharedFields.sourcePlatform,
+      updatedAt: serverTimestamp(),
+    });
+  } else {
+    await setDoc(profileRef, {
+      ...sharedFields,
+      createdAt: serverTimestamp(),
+    });
+  }
+
+  const lookupId = computeProfileLookupId(
+    phoneCheck.normalized,
+    sharedFields.customerName,
+    ward,
+    area
+  );
+  const lookupRef = doc(db, 'customerProfileLookup', lookupId);
+  const existingLookup = await getDoc(lookupRef).catch(() => null);
+  if (existingLookup && existingLookup.exists()) {
+    if (String(existingLookup.data()?.profileId || '') === profile.profileId) {
+      await updateDoc(lookupRef, { updatedAt: serverTimestamp() }).catch(() => {});
+    }
+  } else {
+    await setDoc(lookupRef, {
+      lookupId,
+      profileId: profile.profileId,
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
+  }
+}
+
+export async function saveGuestCloudOrder(
+  input: SaveCloudOrderInput
+): Promise<{ cloudDocId: string; idempotencyKey: string }> {
+  const safeProfileId = isValidCustomerProfileId(input.profileId)
+    ? input.profileId
+    : '';
+  const customerUid = safeProfileId || 'guest';
+  const safeOrderCode = input.orderCode
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, '')
+    .slice(0, 32) || `ORD-${Date.now().toString(36).toUpperCase()}`;
+
+  const cloudDocId =
+    input.cloudDocId && /^[a-zA-Z0-9_-]{3,80}$/.test(input.cloudDocId)
+      ? input.cloudDocId
+      : buildDeterministicOrderDocId(safeOrderCode, customerUid);
+
+  const idempotencyKey =
+    input.idempotencyKey && /^[a-zA-Z0-9_-]{4,80}$/.test(input.idempotencyKey)
+      ? input.idempotencyKey
+      : cloudDocId;
+
+  const phoneCheck = validateIndianMobileNumber(input.alternatePhone || '');
+  if (!phoneCheck.valid) {
+    throw new Error(phoneCheck.reason || 'Valid 10-digit mobile number required.');
+  }
+
+  const cleanName = (input.customerName || '').trim().slice(0, 80);
+  if (cleanName.length < 2) {
+    throw new Error('Customer name (at least 2 letters) is required.');
+  }
+
+  const ward = (input.ward || '').trim().slice(0, 60);
+  const area = (input.area || '').trim().slice(0, 100);
+  const wardArea = composeWardAreaLabel({
+    ward,
+    area,
+    wardArea: input.wardArea,
+  });
+  const deliveryAddress = (input.deliveryAddress || '').trim().slice(0, 250);
+  const paymentMethod = sanitizeCustomerPaymentMethod(input.paymentMethod);
+  const paymentStatus = getInitialCustomerPaymentStatus(paymentMethod);
+  const itemsCount = Math.max(
+    1,
+    Math.min(
+      200,
+      input.items.reduce((sum, li) => sum + Math.max(1, li.quantity), 0)
+    )
+  );
+  const totalAmount = Math.max(0, Math.min(500000, Number(input.totalAmount) || 0));
+  const sessionTotalAmount = Math.max(
+    0,
+    Math.min(500000, Number(input.sessionTotalAmount ?? totalAmount) || totalAmount)
+  );
+
+  await setDoc(doc(db, 'orders', cloudDocId), {
+    customerUid,
+    ...(safeProfileId ? { profileId: safeProfileId } : {}),
+    verifiedPhone: '',
+    orderCode: safeOrderCode,
+    orderMode: input.orderMode === 'home' ? 'home' : 'dine-in',
+    customerName: cleanName,
+    alternatePhone: phoneCheck.normalized,
+    gmail: (input.gmail || '').trim().toLowerCase().slice(0, 120),
+    ward,
+    area,
+    wardArea,
+    deliveryAddress,
+    geoLocationUrl: sanitizeGpsLocationUrl(input.geoLocationUrl),
+    tableNumber: (input.tableNumber || '').trim().slice(0, 40),
+    customerNote: (input.customerNote || '').trim().slice(0, 300),
+    itemsSummary: formatItemsForCloudOrder(input.items) || '1x Cafe Order',
+    itemsCount,
+    deliveryFee: Math.max(0, Math.min(10000, Number(input.deliveryFee) || 0)),
+    pointsRedeemed: Math.max(0, Math.min(100000, Number(input.pointsRedeemed) || 0)),
+    pointsDiscount: Math.max(0, Math.min(50000, Number(input.pointsDiscount) || 0)),
+    paymentMethod,
+    paymentStatus,
+    upiRefNote: (input.upiRefNote || '').trim().slice(0, 80),
+    totalAmount,
+    sessionTotalAmount,
+    previouslySentCount: Math.max(
+      0,
+      Math.min(500, Number(input.previouslySentCount) || 0)
+    ),
+    isFlagged: Boolean(input.isFlagged),
+    flagReason: input.isFlagged
+      ? (input.flagReason || '').trim().slice(0, 200)
+      : '',
+    referralCodeUsed: (input.referralCodeUsed || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9-]/g, '')
+      .slice(0, 32),
+    referralSpinsAwarded: Math.max(
+      0,
+      Math.min(100, Number(input.referralSpinsAwarded) || 0)
+    ),
+    orderStatus: 'pending',
+    sourcePlatform: (input.sourcePlatform === 'android' ? 'android' : 'web') as OrderPlatform,
+    idempotencyKey,
+    createdAt: serverTimestamp(),
+  });
+
+  return { cloudDocId, idempotencyKey };
+}
+
+// =========================================================================
 // Offline -> Online Pending Sync Queue (Idempotent & Non-Destructive)
 // =========================================================================
 
 export type PendingCloudSyncItem =
+  | {
+      kind: 'customerProfile';
+      recordId: string;
+      payload: CustomerProfile;
+      enqueuedAt: number;
+    }
   | {
       kind: 'order';
       recordId: string;
@@ -581,8 +852,14 @@ export async function flushPendingSyncQueue(params: {
 
   for (const item of queue) {
     try {
+      if (item.kind === 'customerProfile') {
+        await saveCloudCustomerProfile(item.payload);
+        flushedCount += 1;
+        continue;
+      }
+
       if (item.kind === 'order') {
-        // Legacy OTP-gated queued item; skip without blocking other items
+        await saveGuestCloudOrder(item.payload);
         flushedCount += 1;
         continue;
       }

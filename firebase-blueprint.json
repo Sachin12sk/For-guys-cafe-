@@ -1,5 +1,79 @@
 {
   "entities": {
+    "GuestCustomerProfile": {
+      "title": "Shared Customer Profile (Zero-OTP)",
+      "description": "Capability-scoped customer profile saved on first visit or edit, auto-filling Home and Dine-In checkout across Web & Android without OTP.",
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "description": "Unguessable high-entropy capability document ID (custprof_*).",
+          "minLength": 20,
+          "maxLength": 80,
+          "pattern": "^custprof_[a-zA-Z0-9_\\-]{16,64}$"
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "phone": {
+          "type": "string",
+          "description": "10-digit Indian mobile number.",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[6-9][0-9]{9}$"
+        },
+        "ward": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "area": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "wardArea": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "deliveryAddress": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 250
+        },
+        "gmail": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "sourcePlatform": {
+          "type": "string",
+          "enum": ["web", "android"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "profileId",
+        "customerName",
+        "phone",
+        "ward",
+        "area",
+        "wardArea",
+        "sourcePlatform",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "CustomerProfile": {
       "title": "Customer Profile",
       "description": "Private authenticated customer profile keyed by Firebase Auth UID with verified SMS phone number and saved delivery preferences.",
@@ -194,11 +268,16 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "profileId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 80
+        },
         "verifiedPhone": {
           "type": "string",
-          "minLength": 8,
+          "minLength": 0,
           "maxLength": 20,
-          "pattern": "^\\+[1-9][0-9]{7,14}$"
+          "pattern": "^$|^\\+[1-9][0-9]{7,14}$"
         },
         "orderCode": {
           "type": "string",
@@ -668,11 +747,44 @@
       },
       "description": "Private order history subcollection owned by the customer and guarded by parent customer ownership."
     },
+    "/customerProfiles/{profileId}": {
+      "schema": {
+        "$ref": "#/entities/GuestCustomerProfile"
+      },
+      "description": "Zero-OTP capability-scoped customer profiles shared across Website & Android with strict list isolation."
+    },
+    "/customerProfileLookup/{lookupId}": {
+      "schema": {
+        "title": "Customer Profile Reinstall Lookup Index",
+        "description": "SHA-256 salted lookup key (cpl_<64hex>) mapping returning customer identity to existing profileId with zero raw PII.",
+        "type": "object",
+        "properties": {
+          "lookupId": {
+            "type": "string",
+            "minLength": 68,
+            "maxLength": 68,
+            "pattern": "^cpl_[a-f0-9]{64}$"
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 80,
+            "pattern": "^custprof_[a-zA-Z0-9_\\-]{16,64}$"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": ["lookupId", "profileId", "updatedAt"]
+      },
+      "description": "Unlistable zero-PII salted SHA-256 index allowing returning customers to recover their Firebase profile on reinstall without duplicates or OTP."
+    },
     "/orders/{orderId}": {
       "schema": {
         "$ref": "#/entities/CloudOrder"
       },
-      "description": "OTP-verified customer orders readable by the owning customer or verified Cafe Admin."
+      "description": "Customer Home & Dine-In orders synced from Website & Android; strictly readable only by verified Cafe Admin or matching authenticated owner."
     },
     "/store/{docId}": {
       "schema": {

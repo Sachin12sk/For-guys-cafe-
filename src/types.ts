@@ -161,10 +161,25 @@ export type PaymentMethod = 'cash' | 'upi';
 
 export type PaymentStatus = 'unpaid' | 'pending_verification' | 'paid';
 
+export interface CustomerProfile {
+  profileId: string;
+  customerName: string;
+  phone: string;
+  ward: string;
+  area: string;
+  wardArea: string;
+  deliveryAddress?: string;
+  gmail?: string;
+  sourcePlatform: OrderPlatform;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface HomeOrderRecord {
   id: string;
   orderCode: string;
   timestamp: string;
+  profileId?: string;
   gmail?: string;
   customerName: string;
   alternatePhone: string;
@@ -200,8 +215,14 @@ export interface TableOrderRecord {
   id: string;
   orderCode: string;
   timestamp: string;
+  profileId?: string;
   tableNumber: string;
+  customerName?: string;
   customerPhone?: string;
+  ward?: string;
+  area?: string;
+  wardArea?: string;
+  deliveryAddress?: string;
   customerNote: string;
   items: OrderLineItem[];
   newOrderAmount: number;

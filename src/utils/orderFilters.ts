@@ -73,7 +73,7 @@ export function filterOrdersByCriteria<
     if (!q) return true;
 
     const itemNames = (order.items || []).map((i) => i.name.toLowerCase()).join(' ');
-    const isHome = 'customerName' in order;
+    const isHome = 'alternatePhone' in order;
     const haystack = isHome
       ? [
           order.orderCode,
@@ -92,7 +92,11 @@ export function filterOrdersByCriteria<
       : [
           order.orderCode,
           order.tableNumber || '',
+          order.customerName || '',
           order.customerPhone || '',
+          order.ward || '',
+          order.area || '',
+          order.wardArea || '',
           order.customerNote || '',
           order.upiRefNote || '',
           itemNames,

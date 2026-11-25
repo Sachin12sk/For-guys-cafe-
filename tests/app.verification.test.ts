@@ -15,6 +15,7 @@ import {
   stripSensitiveKeysDeep,
 } from '../src/utils/storage';
 import {
+  buildCustomerTelUrl,
   buildDeterministicOrderDocId,
   computeCartSubmissionFingerprint,
   createUniqueOrderCode,
@@ -26,8 +27,22 @@ import {
   sanitizeCustomerPaymentMethod,
 } from '../src/services/customerAuth';
 import {
+  applyProfileToDineInFields,
+  applyProfileToHomeDetails,
+  computeProfileLookupId,
+  createHomeOrderSnapshot,
+  createTableOrderSnapshot,
+  isValidCustomerProfileId,
+  loadLocalCustomerProfile,
+  resolveInitialLaunchGateState,
+  saveLocalCustomerProfile,
+  upsertCustomerProfile,
+  validateCustomerProfileInput,
+} from '../src/utils/customerProfile';
+import {
   buildCloudCatalogPayload,
   enqueuePendingSyncItem,
+  lookupCloudCustomerProfileByIdentity,
   mergeCloudCatalogIntoLocal,
   ORDER_STATUS_OPTIONS,
   type PendingCloudSyncItem,
@@ -84,7 +99,11 @@ import {
   splitLegacyWardArea,
 } from '../src/utils/location';
 import type { CafeStoreData, HomeOrderRecord } from '../src/types';
-import { CLOUD_SYNC_SECURITY_TESTS, DIRTY_DOZEN_TESTS } from '../firestore.rules.test';
+import {
+  CLOUD_SYNC_SECURITY_TESTS,
+  DIRTY_DOZEN_TESTS,
+  ZERO_OTP_PROFILE_AND_GUEST_ORDER_SECURITY_TESTS,
+} from '../firestore.rules.test';
 
 const SAMPLE_CAFE_DATA: CafeStoreData = {
   settings: {
@@ -1477,4 +1496,424 @@ test('Firestore Transport Resilience: Forces Long Polling, isolates adminDb cach
   assert.match(firebaseTs, /navigator\.onLine === false/);
 });
 
+function createMemoryStorage(): Storage {
+  const store = new Map<string, string>();
+  return {
+    get length() {
+      return store.size;
+    },
+    clear() {
+      store.clear();
+    },
+    getItem(key: string) {
+      return store.has(key) ? store.get(key)! : null;
+    },
+    key(index: number) {
+      return Array.from(store.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+    setItem(key: string, value: string) {
+      store.set(key, String(value));
+    },
+  };
+}
 
+test('First-Install & First-Launch Gate: Locks Home screen before setup with NO Skip/Close/X & enforces Name, 10-digit Mobile, Ward, Area', async () => {
+  const storage = createMemoryStorage();
+  const rootDir = path.resolve(process.cwd());
+
+  // 1. Fresh install has no local profile and no native backup -> mandatory setup required
+  const gateFresh = await resolveInitialLaunchGateState({
+    localProfile: loadLocalCustomerProfile(storage),
+    nativeBackupProfileId: null,
+    fetchCloudProfile: async () => null,
+  });
+  assert.equal(gateFresh.requiresMandatorySetup, true);
+  assert.equal(gateFresh.profile, null);
+  assert.equal(gateFresh.source, 'none');
+
+  // 2. CustomerProfileModal strictly omits Skip/Close/X/Cancel when mode is mandatory-first-launch
+  const modalSrc = fs.readFileSync(
+    path.join(rootDir, 'src/components/CustomerProfileModal.tsx'),
+    'utf8'
+  );
+  assert.match(modalSrc, /onClick=\{isMandatory \? undefined : onClose\}/);
+  assert.match(modalSrc, /\{!isMandatory && onClose && \(/);
+  assert.equal(modalSrc.includes('Skip'), false);
+
+  // 3. App.tsx blocks Android hardware Back while profileModalMode === 'mandatory-first-launch'
+  const appSrc = fs.readFileSync(path.join(rootDir, 'src/App.tsx'), 'utf8');
+  assert.match(
+    appSrc,
+    /if\s*\(\s*profileModalMode\s*===\s*'mandatory-first-launch'\s*\)\s*\{[\s\S]*return;/
+  );
+
+  // 4. Validation rejects missing Name, invalid Mobile, missing Ward, or missing Area
+  const invalidCheck = validateCustomerProfileInput({
+    customerName: 'A',
+    phone: '12345',
+    ward: '',
+    area: '',
+  });
+  assert.equal(invalidCheck.valid, false);
+  assert.ok(invalidCheck.errors.customerName);
+  assert.ok(invalidCheck.errors.phone);
+  assert.ok(invalidCheck.errors.ward);
+  assert.ok(invalidCheck.errors.area);
+
+  // 5. Valid submission creates capability profileId & salted lookup ID and unlocks home page
+  const savedRes = upsertCustomerProfile(
+    null,
+    {
+      customerName: '  Rohan   Verma ',
+      phone: '+91 96510-08080',
+      ward: 'Ward 4',
+      area: 'Master Market',
+    },
+    'android',
+    '2026-11-25T08:00:00.000Z'
+  );
+  assert.equal(savedRes.ok, true);
+  if (!savedRes.ok) return;
+
+  assert.ok(isValidCustomerProfileId(savedRes.profile.profileId));
+  assert.equal(savedRes.profile.customerName, 'Rohan Verma');
+  assert.equal(savedRes.profile.phone, '9651008080');
+  assert.equal(savedRes.profile.ward, 'Ward 4');
+  assert.equal(savedRes.profile.area, 'Master Market');
+
+  const lookupId = computeProfileLookupId(
+    '9651008080',
+    'Rohan Verma',
+    'Ward 4',
+    'Master Market'
+  );
+  assert.match(lookupId, /^cpl_[0-9a-f]{64}$/);
+
+  saveLocalCustomerProfile(savedRes.profile, storage);
+
+  // 6. App Restart loads local profile directly and does NOT re-trigger mandatory popup
+  const gateRestart = await resolveInitialLaunchGateState({
+    localProfile: loadLocalCustomerProfile(storage),
+    nativeBackupProfileId: null,
+    fetchCloudProfile: async () => null,
+  });
+  assert.equal(gateRestart.requiresMandatorySetup, false);
+  assert.equal(gateRestart.source, 'local');
+  assert.equal(gateRestart.profile?.profileId, savedRes.profile.profileId);
+});
+
+test('Reinstall Recovery & Zero-Duplicate Protection: Restores saved Firebase profile via Android native backup without creating duplicate profile', async () => {
+  const wipedStorage = createMemoryStorage();
+  const created = upsertCustomerProfile(
+    null,
+    {
+      customerName: 'Ananya Gupta',
+      phone: '9651008080',
+      ward: 'Ward 2',
+      area: 'Kakawan Road',
+      deliveryAddress: 'Near Old Temple, Kakawan Road',
+    },
+    'android',
+    '2026-11-25T08:15:00.000Z'
+  );
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  // Simulate uninstall + reinstall: localStorage empty, Android Auto Backup restores profileId
+  const gateReinstall = await resolveInitialLaunchGateState({
+    localProfile: loadLocalCustomerProfile(wipedStorage),
+    nativeBackupProfileId: created.profile.profileId,
+    fetchCloudProfile: async (id) =>
+      id === created.profile.profileId ? created.profile : null,
+  });
+
+  assert.equal(gateReinstall.requiresMandatorySetup, false);
+  assert.equal(gateReinstall.source, 'native_backup_cloud');
+  assert.equal(gateReinstall.profile?.profileId, created.profile.profileId);
+  assert.equal(gateReinstall.profile?.ward, 'Ward 2');
+  assert.equal(gateReinstall.profile?.area, 'Kakawan Road');
+
+  // Re-saving against recovered profile keeps exact same profileId (zero duplicate profile)
+  const updated = upsertCustomerProfile(
+    gateReinstall.profile,
+    {
+      customerName: 'Ananya Gupta',
+      phone: '9651008080',
+      ward: 'Ward 5',
+      area: 'Bilhaur Bazar',
+    },
+    'android',
+    '2026-11-25T09:00:00.000Z'
+  );
+  assert.equal(updated.ok, true);
+  if (!updated.ok) return;
+  assert.equal(updated.profile.profileId, created.profile.profileId);
+  assert.equal(updated.profile.ward, 'Ward 5');
+});
+
+test('Home & Dine-In Checkout Auto-Fill + Immutable Order History on Profile Edit', () => {
+  const initialRes = upsertCustomerProfile(
+    null,
+    {
+      customerName: 'Vikram Singh',
+      phone: '9651008080',
+      ward: 'Ward 3',
+      area: 'Station Road',
+    },
+    'web',
+    '2026-11-25T08:30:00.000Z'
+  );
+  assert.equal(initialRes.ok, true);
+  if (!initialRes.ok) return;
+
+  // Auto-fill Home Order details (Gmail optional, Full Delivery Address separate)
+  const homePrefilled = applyProfileToHomeDetails(initialRes.profile, {
+    gmail: '',
+    customerName: '',
+    alternatePhone: '',
+    ward: '',
+    area: '',
+    wardArea: '',
+    deliveryAddress: '',
+    geoLocationUrl: '',
+    customerNote: '',
+  });
+  assert.equal(homePrefilled.customerName, 'Vikram Singh');
+  assert.equal(homePrefilled.alternatePhone, '9651008080');
+  assert.equal(homePrefilled.ward, 'Ward 3');
+  assert.equal(homePrefilled.area, 'Station Road');
+  assert.equal(homePrefilled.gmail, '');
+
+  // Auto-fill Dine-In checkout (no Delivery Address required)
+  const dineInPrefilled = applyProfileToDineInFields(initialRes.profile, {
+    customerName: '',
+    customerPhone: '',
+    ward: '',
+    area: '',
+  });
+  assert.equal(dineInPrefilled.customerName, 'Vikram Singh');
+  assert.equal(dineInPrefilled.customerPhone, '9651008080');
+  assert.equal(dineInPrefilled.ward, 'Ward 3');
+  assert.equal(dineInPrefilled.area, 'Station Road');
+
+  const cartItem = {
+    id: 'line-1',
+    product: {
+      id: 'prod-margherita',
+      name: 'Margherita Pizza',
+      categoryId: 'cat-pizza',
+      price: 120,
+      description: 'Classic cheese pizza',
+      image: '',
+    },
+    quantity: 1,
+    isSent: false,
+  };
+
+  // Place Home Order #1 & Dine-In Order #1
+  const oldHomeOrder = createHomeOrderSnapshot({
+    id: 'hom-1',
+    orderCode: 'HOM-101',
+    timestamp: '2026-11-25T08:40:00.000Z',
+    profileId: initialRes.profile.profileId,
+    details: {
+      ...homePrefilled,
+      deliveryAddress: 'House 22, Station Road',
+    },
+    items: [cartItem],
+    deliveryFee: 0,
+    totalAmount: 120,
+    sourcePlatform: 'web',
+  });
+  const oldTableOrder = createTableOrderSnapshot({
+    id: 'tbl-1',
+    orderCode: 'TBL-101',
+    timestamp: '2026-11-25T08:45:00.000Z',
+    profileId: initialRes.profile.profileId,
+    tableNumber: 'Table 4',
+    customerName: dineInPrefilled.customerName,
+    customerPhone: dineInPrefilled.customerPhone,
+    ward: dineInPrefilled.ward,
+    area: dineInPrefilled.area,
+    customerNote: '',
+    items: [cartItem],
+    newOrderAmount: 120,
+    sessionTotalAmount: 120,
+    previouslySentCount: 0,
+    sourcePlatform: 'android',
+  });
+
+  // Update Customer Profile to new Ward/Area/Name -> MUST NOT mutate old orders
+  const updatedRes = upsertCustomerProfile(
+    initialRes.profile,
+    {
+      customerName: 'Vikram S. Yadav',
+      phone: '9651008080',
+      ward: 'Ward 7',
+      area: 'GT Road',
+    },
+    'android',
+    '2026-11-25T09:15:00.000Z'
+  );
+  assert.equal(updatedRes.ok, true);
+  if (!updatedRes.ok) return;
+
+  assert.equal(oldHomeOrder.customerName, 'Vikram Singh');
+  assert.equal(oldHomeOrder.ward, 'Ward 3');
+  assert.equal(oldHomeOrder.area, 'Station Road');
+  assert.equal(oldTableOrder.customerName, 'Vikram Singh');
+  assert.equal(oldTableOrder.ward, 'Ward 3');
+
+  // Next checkout picks up updated profile values
+  const nextHomePrefilled = applyProfileToHomeDetails(updatedRes.profile, homePrefilled);
+  assert.equal(nextHomePrefilled.customerName, 'Vikram S. Yadav');
+  assert.equal(nextHomePrefilled.ward, 'Ward 7');
+  assert.equal(nextHomePrefilled.area, 'GT Road');
+});
+
+test('Admin Order Panel, Call tel: Action, Shared Firebase Contract & Android Native Prefs Parity', () => {
+  const rootDir = path.resolve(process.cwd());
+
+  // 1. tel:+91 URL helper for Admin Call buttons
+  assert.equal(buildCustomerTelUrl('9651008080'), 'tel:+919651008080');
+  assert.equal(buildCustomerTelUrl('+91 96510-08080'), 'tel:+919651008080');
+  assert.equal(buildCustomerTelUrl('123'), null);
+
+  // 2. AdminOrdersAndSheetsTab displays Customer Name, Ward/Area, Call buttons, and ZERO "OTP Cloud"
+  const adminTabSrc = fs.readFileSync(
+    path.join(rootDir, 'src/components/AdminOrdersAndSheetsTab.tsx'),
+    'utf8'
+  );
+  assert.equal(adminTabSrc.includes('OTP Cloud'), false);
+  assert.equal(adminTabSrc.includes('OTP Customer'), false);
+  assert.match(adminTabSrc, /buildCustomerTelUrl/);
+  assert.match(adminTabSrc, /order\.customerName/);
+  assert.match(adminTabSrc, /composeWardAreaLabel\(order\)/);
+
+  // 3. Shared Firebase contract includes customerProfiles & customerProfileLookup
+  assert.equal(
+    SHARED_FIREBASE_SYNC_CONTRACT.collections.customerProfiles,
+    'customerProfiles'
+  );
+  assert.equal(
+    SHARED_FIREBASE_SYNC_CONTRACT.collections.customerProfileLookup,
+    'customerProfileLookup'
+  );
+
+  // 4. Android MainActivity exposes FourGuysNativePrefs SharedPreferences bridge, regex check, & allowBackup=true
+  const mainActivitySrc = fs.readFileSync(
+    path.join(rootDir, 'android/app/src/main/java/com/fourguyscafe/app/MainActivity.java'),
+    'utf8'
+  );
+  assert.match(mainActivitySrc, /FourGuysNativePrefs/);
+  assert.match(mainActivitySrc, /getProfileId/);
+  assert.match(mainActivitySrc, /setProfileId/);
+  assert.match(mainActivitySrc, /\^custprof_\[a-zA-Z0-9_-\]\{16,64\}\$/);
+  const manifestSrc = fs.readFileSync(
+    path.join(rootDir, 'android/app/src/main/AndroidManifest.xml'),
+    'utf8'
+  );
+  assert.match(manifestSrc, /android:allowBackup="true"/);
+
+  // 5. firestore.rules & security rules cover /customerProfiles & /customerProfileLookup safely
+  const rulesSrc = fs.readFileSync(path.join(rootDir, 'firestore.rules'), 'utf8');
+  assert.match(rulesSrc, /match \/customerProfiles\/\{profileId\}/);
+  assert.match(rulesSrc, /match \/customerProfileLookup\/\{lookupId\}/);
+  assert.match(rulesSrc, /isValidGuestCustomerProfile/);
+  assert.equal(ZERO_OTP_PROFILE_AND_GUEST_ORDER_SECURITY_TESTS.length, 7);
+  for (const tc of ZERO_OTP_PROFILE_AND_GUEST_ORDER_SECURITY_TESTS) {
+    assert.equal(tc.expected, 'PERMISSION_DENIED');
+  }
+});
+
+test('Security PoC: Rejects Mobile-only / Name+Mobile-only Zero-OTP Restore & Enforces 4-Factor Isolation', async () => {
+  const rootDir = path.resolve(process.cwd());
+
+  // 1. Attempting lookup without all 4 factors (mobile-only or name+mobile-only) returns null immediately
+  assert.equal(
+    await lookupCloudCustomerProfileByIdentity('9651008080', '', '', ''),
+    null
+  );
+  assert.equal(
+    await lookupCloudCustomerProfileByIdentity('9651008080', 'Rohan Verma', '', ''),
+    null
+  );
+  assert.equal(
+    await lookupCloudCustomerProfileByIdentity('9651008080', 'Rohan Verma', 'Ward 4', ''),
+    null
+  );
+
+  // 2. Different Ward or Area produces completely different v2 capability lookup hash
+  const validHash = computeProfileLookupId(
+    '9651008080',
+    'Rohan Verma',
+    'Ward 4',
+    'Master Market'
+  );
+  const normalizedSameHash = computeProfileLookupId(
+    '+91 96510-08080',
+    '  rohan   verma ',
+    'ward 4',
+    'master   market'
+  );
+  const wrongWardHash = computeProfileLookupId(
+    '9651008080',
+    'Rohan Verma',
+    'Ward 5',
+    'Master Market'
+  );
+  const wrongAreaHash = computeProfileLookupId(
+    '9651008080',
+    'Rohan Verma',
+    'Ward 4',
+    'Station Road'
+  );
+
+  assert.equal(validHash, normalizedSameHash);
+  assert.notEqual(validHash, wrongWardHash);
+  assert.notEqual(validHash, wrongAreaHash);
+
+  // 3. Modal restore handler explicitly refuses partial / mobile-only attempts
+  const modalSrc = fs.readFileSync(
+    path.join(rootDir, 'src/components/CustomerProfileModal.tsx'),
+    'utf8'
+  );
+  assert.match(modalSrc, /!trimmedPhone \|\| !trimmedName \|\| !trimmedWard \|\| !trimmedArea/);
+  assert.match(modalSrc, /isValidCustomerProfileId\(trimmedCode\)/);
+
+  // 4. Existing Admin Google Login & /admins protection remain intact
+  const rulesSrc = fs.readFileSync(path.join(rootDir, 'firestore.rules'), 'utf8');
+  const customerAuthSrc = fs.readFileSync(
+    path.join(rootDir, 'src/services/customerAuth.ts'),
+    'utf8'
+  );
+  assert.match(rulesSrc, /ashuofficial2093@gmail\.com/);
+  assert.match(customerAuthSrc, /ashuofficial2093@gmail\.com/);
+  assert.match(customerAuthSrc, /GoogleAuthProvider/);
+});
+
+test('Boot Resilience & SW Conflict Guard: Entry script path, NetworkFirst HTML, dev SW disabled, and non-destructive auto-recovery', () => {
+  const rootDir = path.resolve(process.cwd());
+  const indexHtml = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
+  const viteConfig = fs.readFileSync(path.join(rootDir, 'vite.config.ts'), 'utf8');
+  const mainTsx = fs.readFileSync(path.join(rootDir, 'src/main.tsx'), 'utf8');
+
+  // 1. Entry module script uses root-safe /src/main.tsx and filters boot script errors cleanly
+  assert.match(indexHtml, /<script\s+type="module"[^>]*src="\/src\/main\.tsx"/);
+  assert.match(indexHtml, /__FOUR_GUYS_MARK_MOUNTED__/);
+  assert.match(indexHtml, /fg_boot_recover_v1/);
+
+  // 2. VitePWA disables broken dev-dist SW in dev preview and uses NetworkFirst for HTML navigation
+  assert.match(viteConfig, /devOptions:\s*\{\s*enabled:\s*false/);
+  assert.match(viteConfig, /navigateFallback:\s*null/);
+  assert.match(viteConfig, /handler:\s*'NetworkFirst'/);
+  assert.match(viteConfig, /globIgnores:\s*\[[^\]]*'?\*\*\/index\.html'?/);
+
+  // 3. main.tsx only registers SW in production non-native non-dev-preview hosts and cleans stale SWs otherwise
+  assert.match(mainTsx, /cleanupConflictingServiceWorkers/);
+  assert.match(mainTsx, /import\.meta\.env\.PROD && !isCapacitorNative\(\)/);
+  assert.match(mainTsx, /ais-dev-/);
+});

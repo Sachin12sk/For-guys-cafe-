@@ -49,6 +49,8 @@
       (function () {
         window.__FOUR_GUYS_MOUNTED__ = false;
         var shown = false;
+        var RECOVER_KEY = 'fg_boot_recover_v1';
+        var bootTimer = null;
 
         function escapeHtml(str) {
           return String(str || '')
@@ -57,14 +59,76 @@
             .replace(/>/g, '&gt;');
         }
 
-        function showBootError(reason) {
+        function clearServiceWorkersAndCaches() {
+          return Promise.resolve()
+            .then(function () {
+              if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+                return navigator.serviceWorker.getRegistrations().then(function (regs) {
+                  return Promise.all(regs.map(function (r) { return r.unregister(); }));
+                });
+              }
+            })
+            .then(function () {
+              if ('caches' in window && caches.keys) {
+                return caches.keys().then(function (keys) {
+                  return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                });
+              }
+            })
+            .catch(function () {});
+        }
+
+        function reloadWithoutStaleCache() {
+          clearServiceWorkersAndCaches().finally(function () {
+            try {
+              var nextUrl = new URL(window.location.href);
+              nextUrl.searchParams.set('_fg_cb', String(Date.now()));
+              window.location.replace(nextUrl.toString());
+            } catch (e) {
+              window.location.reload();
+            }
+          });
+        }
+
+        function markMounted() {
+          window.__FOUR_GUYS_MOUNTED__ = true;
+          if (bootTimer) {
+            clearTimeout(bootTimer);
+            bootTimer = null;
+          }
+          try {
+            sessionStorage.removeItem(RECOVER_KEY);
+          } catch (e) {}
+        }
+
+        window.__FOUR_GUYS_MARK_MOUNTED__ = markMounted;
+
+        function showBootError(reason, allowAutoRecover) {
           if (window.__FOUR_GUYS_MOUNTED__ || shown) return;
+
+          var textReason = String(reason || '');
+          var isRawSource = /main\.tsx/i.test(textReason);
+          var isNative = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+
+          if (allowAutoRecover && !isRawSource && !isNative) {
+            try {
+              if (!sessionStorage.getItem(RECOVER_KEY)) {
+                sessionStorage.setItem(RECOVER_KEY, '1');
+                reloadWithoutStaleCache();
+                return;
+              }
+            } catch (e) {}
+          }
+
           shown = true;
+          if (bootTimer) {
+            clearTimeout(bootTimer);
+            bootTimer = null;
+          }
           var root = document.getElementById('root');
           if (!root) return;
-          var isRawSource = /main\.tsx/i.test(String(reason || ''));
           var hint = isRawSource
-            ? 'GitHub Pages is serving raw source index.html instead of the built dist/ bundle. Enable Settings -> Pages -> Source: GitHub Actions.'
+            ? 'Please verify the Vite dev server is running or deploy the built dist/ bundle.'
             : 'Please clear cached offline files and reload.';
           root.innerHTML =
             '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#FAF9F6;color:#1C1917;font-family:system-ui,-apple-system,sans-serif">' +
@@ -72,7 +136,7 @@
                 '<div style="font-weight:800;font-size:20px;color:#1C1917">FOUR GUYS CAFE</div>' +
                 '<p style="margin:10px 0 0;font-size:14px;color:#44403C;line-height:1.5">Unable to start the QR Menu cleanly. ' + escapeHtml(hint) + '</p>' +
                 '<p style="margin:12px 0 0;padding:10px;border-radius:12px;background:#F5F5F4;border:1px solid #E7E5E4;font-size:12px;color:#57534E;word-break:break-word">' +
-                  escapeHtml(reason || 'Application bundle did not initialize.') +
+                  escapeHtml(textReason || 'Application bundle did not initialize.') +
                 '</p>' +
                 '<div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">' +
                   '<button id="fg-clear-cache-btn" type="button" style="flex:1;min-width:160px;min-height:44px;padding:10px 14px;border-radius:12px;border:none;background:#C83E2B;color:#FFFFFF;font-weight:700;font-size:13px;cursor:pointer">Clear Cache &amp; Reload</button>' +
@@ -84,25 +148,10 @@
           var clearBtn = document.getElementById('fg-clear-cache-btn');
           if (clearBtn) {
             clearBtn.onclick = function () {
-              Promise.resolve()
-                .then(function () {
-                  if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
-                    return navigator.serviceWorker.getRegistrations().then(function (regs) {
-                      return Promise.all(regs.map(function (r) { return r.unregister(); }));
-                    });
-                  }
-                })
-                .then(function () {
-                  if ('caches' in window && caches.keys) {
-                    return caches.keys().then(function (keys) {
-                      return Promise.all(keys.map(function (k) { return caches.delete(k); }));
-                    });
-                  }
-                })
-                .catch(function () {})
-                .finally(function () {
-                  window.location.reload();
-                });
+              try {
+                sessionStorage.removeItem(RECOVER_KEY);
+              } catch (e) {}
+              reloadWithoutStaleCache();
             };
           }
 
@@ -111,17 +160,16 @@
             resetBtn.onclick = function () {
               try {
                 localStorage.removeItem('four_guys_cafe_menu_v3');
+                sessionStorage.removeItem(RECOVER_KEY);
               } catch (e) {}
-              if (clearBtn) {
-                clearBtn.click();
-              } else {
-                window.location.reload();
-              }
+              reloadWithoutStaleCache();
             };
           }
         }
 
-        window.__FOUR_GUYS_SHOW_BOOT_ERROR__ = showBootError;
+        window.__FOUR_GUYS_SHOW_BOOT_ERROR__ = function (reason) {
+          showBootError(reason, false);
+        };
 
         window.addEventListener(
           'error',
@@ -129,11 +177,18 @@
             if (window.__FOUR_GUYS_MOUNTED__) return;
             var target = event && event.target;
             if (target && target !== window && target.tagName === 'SCRIPT') {
-              showBootError('Failed to load script: ' + (target.src || target.getAttribute('src') || 'module bundle'));
+              var scriptSrc = target.src || target.getAttribute('src') || '';
+              var isEntryScript =
+                target.getAttribute('data-fourguys-entry') === 'true' ||
+                /\/(?:src\/main\.tsx|assets\/index-[^/?#]+\.js)/i.test(scriptSrc);
+              if (!isEntryScript) {
+                return;
+              }
+              showBootError('Failed to load script: ' + (scriptSrc || 'module bundle'), true);
               return;
             }
             if (event && event.message) {
-              showBootError(event.message);
+              showBootError(event.message, false);
             }
           },
           true
@@ -142,16 +197,18 @@
         window.addEventListener('unhandledrejection', function (event) {
           if (window.__FOUR_GUYS_MOUNTED__) return;
           var reason = event && event.reason;
-          showBootError((reason && reason.message) || String(reason || 'Unhandled startup rejection'));
+          var msg = (reason && reason.message) || String(reason || 'Unhandled startup rejection');
+          var isModuleFetchError = /failed to fetch dynamically imported module|importing a module script failed/i.test(msg);
+          showBootError(msg, isModuleFetchError);
         });
 
-        setTimeout(function () {
+        bootTimer = setTimeout(function () {
           if (!window.__FOUR_GUYS_MOUNTED__) {
-            showBootError('Startup timed out before the menu initialized.');
+            showBootError('Startup timed out before the menu initialized.', true);
           }
-        }, 6500);
+        }, 15000);
       })();
     </script>
-    <script type="module" src="./src/main.tsx"></script>
+    <script type="module" data-fourguys-entry="true" src="/src/main.tsx"></script>
   </body>
 </html>

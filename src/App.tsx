@@ -18,6 +18,7 @@ import {
   ExternalLink,
   ArrowUpDown,
   Store,
+  User as UserIcon,
 } from 'lucide-react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
@@ -48,6 +49,7 @@ import type {
   CafeStoreData,
   CartItem,
   ComboSet,
+  CustomerProfile,
   HomeOrderDetails,
   HomeOrderRecord,
   LoyaltyState,
@@ -79,19 +81,24 @@ import {
   updateAdminCloudOrderStatus,
   verifyAdminCloudAuthorization,
   verifyAdminCloudOrderPayment,
+  type SaveCloudOrderInput,
 } from './services/customerAuth';
 import {
   deleteCloudReferralRecord,
   deleteCloudReview,
   deleteCloudVibeSnap,
   enqueuePendingSyncItem,
+  fetchCloudCustomerProfile,
   flushPendingSyncQueue,
   loadPendingSyncQueue,
+  lookupCloudCustomerProfileByIdentity,
   mergeCloudCatalogIntoLocal,
+  saveCloudCustomerProfile,
   saveCloudReferralRecord,
   saveCloudReview,
   saveCloudStoreCatalog,
   saveCloudVibeSnap,
+  saveGuestCloudOrder,
   subscribeAdminCloudReferrals,
   subscribeCloudReviews,
   subscribeCloudStoreCatalog,
@@ -114,9 +121,23 @@ import { isValidUpiId } from './utils/upi';
 import {
   exitNativeAndroidApp,
   getActiveOrderPlatform,
+  readNativeBackupProfileId,
   subscribeNativeAndroidBackButton,
   subscribeNativeAppLifecycle,
+  writeNativeBackupProfileId,
 } from './utils/nativeAndroid';
+import {
+  applyProfileToDineInFields,
+  applyProfileToHomeDetails,
+  createHomeOrderSnapshot,
+  createTableOrderSnapshot,
+  loadLocalCustomerProfile,
+  resolveInitialLaunchGateState,
+  saveLocalCustomerProfile,
+  upsertCustomerProfile,
+  type CustomerProfileInput,
+} from './utils/customerProfile';
+import { CustomerProfileModal } from './components/CustomerProfileModal';
 import { CategoryStackCard } from './components/CategoryStackCard';
 import { ComboCard } from './components/ComboCard';
 import { ProductCard } from './components/ProductCard';
@@ -533,14 +554,21 @@ export default function App() {
   const [cafeData, setCafeData] = useState<CafeStoreData>(loadStoredMenu);
   const [orderMode, setOrderMode] = useState<OrderMode>(getInitialModeFromUrl);
 
+  const [customerProfile, setCustomerProfile] = useState<CustomerProfile | null>(
+    () => loadLocalCustomerProfile()
+  );
+  const [profileModalMode, setProfileModalMode] = useState<
+    'mandatory-first-launch' | 'edit' | null
+  >(() => (loadLocalCustomerProfile() ? null : 'mandatory-first-launch'));
+
   const [dineInCart, setDineInCart] = useState<CartItem[]>(() =>
     loadStoredCart(CART_STORAGE_KEY)
   );
   const [homeCart, setHomeCart] = useState<CartItem[]>(() =>
     loadStoredCart(HOME_CART_STORAGE_KEY)
   );
-  const [homeDetails, setHomeDetails] = useState<HomeOrderDetails>(
-    loadStoredHomeDetails
+  const [homeDetails, setHomeDetails] = useState<HomeOrderDetails>(() =>
+    applyProfileToHomeDetails(loadLocalCustomerProfile(), loadStoredHomeDetails())
   );
   const [savedHomeProfiles, setSavedHomeProfiles] = useState<
     Record<string, SavedHomeCustomerProfile>
@@ -585,7 +613,18 @@ export default function App() {
   const [rateSort, setRateSort] = useState<RateSortMode>('default');
   const [searchQuery, setSearchQuery] = useState('');
   const [tableNumber, setTableNumber] = useState<string>(getInitialTableFromUrl);
-  const [dineInPhone, setDineInPhone] = useState('');
+  const [dineInName, setDineInName] = useState<string>(
+    () => loadLocalCustomerProfile()?.customerName || ''
+  );
+  const [dineInPhone, setDineInPhone] = useState<string>(
+    () => loadLocalCustomerProfile()?.phone || ''
+  );
+  const [dineInWard, setDineInWard] = useState<string>(
+    () => loadLocalCustomerProfile()?.ward || ''
+  );
+  const [dineInArea, setDineInArea] = useState<string>(
+    () => loadLocalCustomerProfile()?.area || ''
+  );
   const [customerNote, setCustomerNote] = useState('');
   const [dineInRedeemPoints, setDineInRedeemPoints] = useState(false);
   const [homeRedeemPoints, setHomeRedeemPoints] = useState(false);
@@ -858,9 +897,87 @@ export default function App() {
     return () => unsubAdminAuth();
   }, []);
 
+  // Startup First-Launch / Reinstall Recovery & Background Firebase Profile Sync
+  useEffect(() => {
+    let cancelled = false;
+    const localProf = loadLocalCustomerProfile();
+    const nativeBackupId = readNativeBackupProfileId();
+
+    if (localProf) {
+      writeNativeBackupProfileId(localProf.profileId);
+      if (isOnline) {
+        void fetchCloudCustomerProfile(localProf.profileId)
+          .then((remote) => {
+            if (cancelled) return;
+            if (!remote) {
+              return saveCloudCustomerProfile(localProf).catch(() => {});
+            }
+            if (remote.updatedAt > localProf.updatedAt) {
+              saveLocalCustomerProfile(remote);
+              setCustomerProfile(remote);
+              setHomeDetails((prev) => applyProfileToHomeDetails(remote, prev));
+              const nextDineIn = applyProfileToDineInFields(remote, {
+                customerName: '',
+                customerPhone: '',
+                ward: '',
+                area: '',
+              });
+              setDineInName(nextDineIn.customerName);
+              setDineInPhone(nextDineIn.customerPhone);
+              setDineInWard(nextDineIn.ward);
+              setDineInArea(nextDineIn.area);
+            }
+          })
+          .catch(() => {});
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (nativeBackupId) {
+      void resolveInitialLaunchGateState({
+        localProfile: null,
+        nativeBackupProfileId: nativeBackupId,
+        fetchCloudProfile: fetchCloudCustomerProfile,
+      }).then((gate) => {
+        if (cancelled) return;
+        if (!gate.requiresMandatorySetup && gate.profile) {
+          saveLocalCustomerProfile(gate.profile);
+          writeNativeBackupProfileId(gate.profile.profileId);
+          setCustomerProfile(gate.profile);
+          setHomeDetails((prev) => applyProfileToHomeDetails(gate.profile, prev));
+          const nextDineIn = applyProfileToDineInFields(gate.profile, {
+            customerName: '',
+            customerPhone: '',
+            ward: '',
+            area: '',
+          });
+          setDineInName(nextDineIn.customerName);
+          setDineInPhone(nextDineIn.customerPhone);
+          setDineInWard(nextDineIn.ward);
+          setDineInArea(nextDineIn.area);
+          setProfileModalMode(null);
+        }
+      });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOnline]);
+
   // Native Android Back Button & App Lifecycle (Resume / QR Deep Links)
   const nativeBackHandlerRef = useRef<() => void>(() => {});
   nativeBackHandlerRef.current = () => {
+    if (profileModalMode === 'mandatory-first-launch') {
+      // Mandatory first-launch profile popup cannot be dismissed with hardware Back
+      return;
+    }
+    if (profileModalMode === 'edit') {
+      setProfileModalMode(null);
+      return;
+    }
     if (ratingPrompt) {
       setRatingPrompt(null);
       return;
@@ -1616,18 +1733,20 @@ export default function App() {
 
       setLoadedProfileGmail(norm);
     } else if (loadedProfileGmail !== null) {
-      // Switched from a returning customer's Gmail to a new/unseen Gmail -> clear prior customer's data cleanly
-      setHomeDetails({
-        gmail: nextGmail,
-        customerName: '',
-        alternatePhone: '',
-        ward: '',
-        area: '',
-        wardArea: '',
-        deliveryAddress: '',
-        geoLocationUrl: '',
-        customerNote: '',
-      });
+      // Switched from a returning customer's Gmail to a new/unseen Gmail -> clear old Gmail data while preserving active Customer Profile auto-fill
+      setHomeDetails(
+        applyProfileToHomeDetails(customerProfile, {
+          gmail: nextGmail,
+          customerName: '',
+          alternatePhone: '',
+          ward: '',
+          area: '',
+          wardArea: '',
+          deliveryAddress: '',
+          geoLocationUrl: '',
+          customerNote: '',
+        })
+      );
       setHomeCart((prev) => prev.filter((i) => !i.fromSavedProfile));
       setLoadedProfileGmail(null);
     } else {
@@ -1819,6 +1938,136 @@ export default function App() {
     }, 850);
   };
 
+  const applySavedProfileToCheckouts = (profile: CustomerProfile) => {
+    setHomeDetails((prev) => applyProfileToHomeDetails(profile, prev));
+    setDineInName(profile.customerName);
+    setDineInPhone(profile.phone);
+    setDineInWard(profile.ward);
+    setDineInArea(profile.area);
+  };
+
+  const handleSaveCustomerProfile = async (
+    input: CustomerProfileInput
+  ): Promise<{ ok: boolean; error?: string; restored?: boolean }> => {
+    let baseProfile: CustomerProfile | null = customerProfile;
+    let restoredExisting = false;
+
+    if (!baseProfile && isOnline) {
+      const existingByIdentity = await lookupCloudCustomerProfileByIdentity(
+        input.phone,
+        input.customerName,
+        input.ward,
+        input.area
+      ).catch(() => null);
+      if (existingByIdentity) {
+        baseProfile = existingByIdentity;
+        restoredExisting = true;
+      }
+    }
+
+    const result = upsertCustomerProfile(
+      baseProfile,
+      input,
+      getActiveOrderPlatform()
+    );
+    if (!result.ok) {
+      return {
+        ok: false,
+        error:
+          result.validation.summaryError ||
+          'Please complete Name, 10-Digit Mobile, Ward Number, and Area.',
+      };
+    }
+
+    const savedProfile = result.profile;
+    const storedOk = saveLocalCustomerProfile(savedProfile);
+    if (!storedOk) {
+      setStorageWarning(
+        'Device storage is low — profile saved in memory & synced to Firebase.'
+      );
+    }
+    writeNativeBackupProfileId(savedProfile.profileId);
+    setCustomerProfile(savedProfile);
+    applySavedProfileToCheckouts(savedProfile);
+    setProfileModalMode(null);
+
+    if (isOnline) {
+      try {
+        await saveCloudCustomerProfile(savedProfile);
+      } catch {
+        setPendingSyncQueue((q) =>
+          enqueuePendingSyncItem(q, {
+            kind: 'customerProfile',
+            recordId: savedProfile.profileId,
+            payload: savedProfile,
+            enqueuedAt: Date.now(),
+          })
+        );
+      }
+    } else {
+      setPendingSyncQueue((q) =>
+        enqueuePendingSyncItem(q, {
+          kind: 'customerProfile',
+          recordId: savedProfile.profileId,
+          payload: savedProfile,
+          enqueuedAt: Date.now(),
+        })
+      );
+    }
+
+    return { ok: true, restored: restoredExisting };
+  };
+
+  const handleRestoreProfileFromFirebase = async (params: {
+    phone?: string;
+    customerName?: string;
+    ward?: string;
+    area?: string;
+    profileId?: string;
+  }): Promise<{ ok: boolean; profile?: CustomerProfile; error?: string }> => {
+    if (!isOnline) {
+      return {
+        ok: false,
+        error: 'Internet connection required to search saved profiles on Firebase.',
+      };
+    }
+
+    let found: CustomerProfile | null = null;
+    if (params.profileId && params.profileId.trim()) {
+      found = await fetchCloudCustomerProfile(params.profileId.trim());
+    }
+    if (
+      !found &&
+      params.phone &&
+      params.customerName &&
+      params.ward &&
+      params.area
+    ) {
+      found = await lookupCloudCustomerProfileByIdentity(
+        params.phone,
+        params.customerName,
+        params.ward,
+        params.area
+      );
+    }
+
+    if (!found) {
+      return {
+        ok: false,
+        error:
+          'No matching saved profile found in Firebase. Fill the quick form above once to create yours.',
+      };
+    }
+
+    saveLocalCustomerProfile(found);
+    writeNativeBackupProfileId(found.profileId);
+    setCustomerProfile(found);
+    applySavedProfileToCheckouts(found);
+    setProfileModalMode(null);
+
+    return { ok: true, profile: found };
+  };
+
   // Order Analytics & Excel Sheet Recording Handlers (Duplicate-protected & Idempotent Cloud Sync)
   const handleRecordTableOrder = (meta: CheckoutSubmissionMeta) => {
     const newItems = dineInCart.filter((i) => !i.isSent);
@@ -1859,11 +2108,27 @@ export default function App() {
     const netNewOrderAmount = Math.max(0, grossNewOrderAmount - appliedPointsDiscount);
     const sessionTotalAmount = Math.max(0, grossSessionAmount - appliedPointsDiscount);
 
+    const resolvedDineInName =
+      dineInName.trim() || customerProfile?.customerName || 'Guest';
+    const rawPhoneInput = dineInPhone.trim() || customerProfile?.phone || '';
+    const phoneValidation = rawPhoneInput
+      ? validateIndianMobileNumber(rawPhoneInput)
+      : { valid: false, normalized: '' };
+    const resolvedDineInPhone = phoneValidation.valid
+      ? phoneValidation.normalized
+      : rawPhoneInput || undefined;
+    const resolvedDineInWard = dineInWard.trim() || customerProfile?.ward || '';
+    const resolvedDineInArea = dineInArea.trim() || customerProfile?.area || '';
+
     const fingerprint = computeCartSubmissionFingerprint({
       orderMode: 'dine-in',
       items: lineItems,
       totalAmount: netNewOrderAmount,
-      identityKey: tableNumber.trim() || dineInPhone.trim() || 'table',
+      identityKey:
+        tableNumber.trim() ||
+        resolvedDineInPhone ||
+        resolvedDineInName ||
+        'table',
     });
     const now = Date.now();
     if (
@@ -1895,7 +2160,7 @@ export default function App() {
     );
     const deterministicDocId = buildDeterministicOrderDocId(
       orderCode,
-      dineInPhone.trim() || 'guest'
+      customerProfile?.profileId || resolvedDineInPhone || 'guest'
     );
 
     const refSpinsSetting = Math.max(
@@ -1924,22 +2189,19 @@ export default function App() {
     const safeUpiRefNote =
       safePaymentMethod === 'upi' ? (meta.upiRefNote || '').trim().slice(0, 64) : '';
 
-    const rawPhoneInput = dineInPhone.trim();
-    const phoneValidation = rawPhoneInput
-      ? validateIndianMobileNumber(rawPhoneInput)
-      : { valid: false, normalized: '' };
-    const resolvedDineInPhone = phoneValidation.valid
-      ? phoneValidation.normalized
-      : rawPhoneInput || undefined;
-
-    const record: TableOrderRecord = {
+    const activePlatform = getActiveOrderPlatform();
+    const record = createTableOrderSnapshot({
       id: `tbl-${deterministicDocId}`,
       orderCode,
       timestamp: new Date().toISOString(),
+      profileId: customerProfile?.profileId,
       tableNumber: tableNumber.trim() || 'Counter / Walk-in',
+      customerName: resolvedDineInName,
       customerPhone: resolvedDineInPhone,
+      ward: resolvedDineInWard,
+      area: resolvedDineInArea,
       customerNote: customerNote.trim(),
-      items: lineItems,
+      items: newItems,
       newOrderAmount: netNewOrderAmount,
       sessionTotalAmount,
       previouslySentCount,
@@ -1952,12 +2214,69 @@ export default function App() {
       flagReason: highQty.isFlagged ? highQty.reason : undefined,
       referralCodeUsed: activePendingRef,
       referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
-      orderStatus: 'pending',
-      sourcePlatform: getActiveOrderPlatform(),
+      sourcePlatform: activePlatform,
       idempotencyKey: deterministicDocId,
-    };
+    });
 
     setTableOrders((prev) => [record, ...prev]);
+
+    if (phoneValidation.valid && resolvedDineInName.length >= 2) {
+      const cloudOrderPayload: SaveCloudOrderInput = {
+        profileId: customerProfile?.profileId,
+        orderCode: record.orderCode,
+        orderMode: 'dine-in',
+        customerName: resolvedDineInName,
+        alternatePhone: phoneValidation.normalized,
+        ward: resolvedDineInWard,
+        area: resolvedDineInArea,
+        wardArea: record.wardArea,
+        tableNumber: record.tableNumber,
+        customerNote: record.customerNote,
+        items: lineItems,
+        deliveryFee: 0,
+        pointsRedeemed: appliedPointsRedeemed,
+        pointsDiscount: appliedPointsDiscount,
+        paymentMethod: safePaymentMethod,
+        upiRefNote: safeUpiRefNote || undefined,
+        totalAmount: netNewOrderAmount,
+        sessionTotalAmount,
+        previouslySentCount,
+        isFlagged: highQty.isFlagged,
+        flagReason: highQty.isFlagged ? highQty.reason : undefined,
+        referralCodeUsed: activePendingRef,
+        referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
+        sourcePlatform: activePlatform,
+        cloudDocId: deterministicDocId,
+        idempotencyKey: deterministicDocId,
+      };
+      if (isOnline) {
+        void saveGuestCloudOrder(cloudOrderPayload)
+          .then(({ cloudDocId }) => {
+            setTableOrders((prev) =>
+              prev.map((o) => (o.id === record.id ? { ...o, cloudDocId } : o))
+            );
+          })
+          .catch(() => {
+            setPendingSyncQueue((q) =>
+              enqueuePendingSyncItem(q, {
+                kind: 'order',
+                recordId: record.id,
+                payload: cloudOrderPayload,
+                enqueuedAt: Date.now(),
+              })
+            );
+          });
+      } else {
+        setPendingSyncQueue((q) =>
+          enqueuePendingSyncItem(q, {
+            kind: 'order',
+            recordId: record.id,
+            payload: cloudOrderPayload,
+            enqueuedAt: Date.now(),
+          })
+        );
+      }
+    }
 
     const earnedPoints =
       cafeData.settings.loyaltyEnabled !== false
@@ -1971,7 +2290,7 @@ export default function App() {
       pointsToDeduct: appliedPointsRedeemed,
       discountApplied: appliedPointsDiscount,
       orderLabel: `Dine-In Order ${record.orderCode} (₹${netNewOrderAmount})`,
-      customerLabel: record.tableNumber,
+      customerLabel: `${resolvedDineInName} · ${record.tableNumber}`,
       verifiedReferralCode: activePendingRef,
       verifiedReferralSpins: activePendingRef ? refSpinsSetting : undefined,
     });
@@ -1983,7 +2302,12 @@ export default function App() {
     scheduleRatingPopup({
       orderMode: 'dine-in',
       orderCode: record.orderCode,
-      defaultName: tableNumber.trim() ? `Guest (${tableNumber.trim()})` : '',
+      defaultName:
+        resolvedDineInName !== 'Guest'
+          ? resolvedDineInName
+          : tableNumber.trim()
+          ? `Guest (${tableNumber.trim()})`
+          : '',
       earnedPoints,
     });
   };
@@ -2028,15 +2352,16 @@ export default function App() {
     const totalAmount = discountedSubtotal + deliveryFee;
     const normGmail = normalizeGmail(homeDetails.gmail);
 
+    const resolvedName =
+      homeDetails.customerName.trim() || customerProfile?.customerName || 'Customer';
+    const resolvedPhone =
+      homeDetails.alternatePhone.trim() || customerProfile?.phone || '';
+
     const fingerprint = computeCartSubmissionFingerprint({
       orderMode: 'home',
       items: lineItems,
       totalAmount,
-      identityKey:
-        homeDetails.alternatePhone ||
-        normGmail ||
-        homeDetails.customerName ||
-        'home',
+      identityKey: resolvedPhone || normGmail || resolvedName || 'home',
     });
     const now = Date.now();
     if (
@@ -2064,7 +2389,7 @@ export default function App() {
     );
     const deterministicDocId = buildDeterministicOrderDocId(
       orderCode,
-      homeDetails.alternatePhone || normGmail || 'guest'
+      customerProfile?.profileId || resolvedPhone || normGmail || 'guest'
     );
 
     const refSpinsSetting = Math.max(
@@ -2085,8 +2410,8 @@ export default function App() {
 
     const splitOrderLoc = splitLegacyWardArea(
       homeDetails.wardArea,
-      homeDetails.ward,
-      homeDetails.area
+      homeDetails.ward || customerProfile?.ward,
+      homeDetails.area || customerProfile?.area
     );
     const cleanWard = splitOrderLoc.ward.trim();
     const cleanArea = splitOrderLoc.area.trim();
@@ -2107,20 +2432,26 @@ export default function App() {
     const safeUpiRefNote =
       safePaymentMethod === 'upi' ? (meta.upiRefNote || '').trim().slice(0, 64) : '';
 
-    const record: HomeOrderRecord = {
+    const activePlatform = getActiveOrderPlatform();
+    const snapshotDetails: HomeOrderDetails = {
+      ...homeDetails,
+      gmail: normGmail,
+      customerName: resolvedName,
+      alternatePhone: resolvedPhone,
+      ward: cleanWard,
+      area: cleanArea,
+      wardArea: cleanWardArea,
+      deliveryAddress: cleanDeliveryAddress,
+      geoLocationUrl: safeGeoUrl,
+    };
+
+    const record = createHomeOrderSnapshot({
       id: `hom-${deterministicDocId}`,
       orderCode,
       timestamp: new Date().toISOString(),
-      gmail: normGmail || undefined,
-      customerName: homeDetails.customerName.trim() || 'Customer',
-      alternatePhone: homeDetails.alternatePhone.trim(),
-      ward: cleanWard || undefined,
-      area: cleanArea || undefined,
-      wardArea: cleanWardArea,
-      deliveryAddress: cleanDeliveryAddress || undefined,
-      geoLocationUrl: safeGeoUrl,
-      customerNote: homeDetails.customerNote.trim(),
-      items: lineItems,
+      profileId: customerProfile?.profileId,
+      details: snapshotDetails,
+      items: selectedItems,
       deliveryFee,
       pointsRedeemed: appliedPointsRedeemed > 0 ? appliedPointsRedeemed : undefined,
       pointsDiscount: appliedPointsDiscount > 0 ? appliedPointsDiscount : undefined,
@@ -2132,13 +2463,71 @@ export default function App() {
       flagReason: highQty.isFlagged ? highQty.reason : undefined,
       referralCodeUsed: activePendingRef,
       referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
-      orderStatus: 'pending',
-      sourcePlatform: getActiveOrderPlatform(),
+      sourcePlatform: activePlatform,
       idempotencyKey: deterministicDocId,
-    };
+    });
 
     setHomeOrders((prev) => [record, ...prev]);
     setLastOrderAt(Date.now());
+
+    const phoneValidation = validateIndianMobileNumber(resolvedPhone);
+    if (phoneValidation.valid && resolvedName.length >= 2) {
+      const cloudOrderPayload: SaveCloudOrderInput = {
+        profileId: customerProfile?.profileId,
+        orderCode: record.orderCode,
+        orderMode: 'home',
+        customerName: resolvedName,
+        alternatePhone: phoneValidation.normalized,
+        gmail: normGmail || undefined,
+        ward: cleanWard,
+        area: cleanArea,
+        wardArea: cleanWardArea,
+        deliveryAddress: cleanDeliveryAddress || undefined,
+        geoLocationUrl: safeGeoUrl,
+        customerNote: homeDetails.customerNote.trim(),
+        items: lineItems,
+        deliveryFee,
+        pointsRedeemed: appliedPointsRedeemed,
+        pointsDiscount: appliedPointsDiscount,
+        paymentMethod: safePaymentMethod,
+        upiRefNote: safeUpiRefNote || undefined,
+        totalAmount,
+        isFlagged: highQty.isFlagged,
+        flagReason: highQty.isFlagged ? highQty.reason : undefined,
+        referralCodeUsed: activePendingRef,
+        referralSpinsAwarded: activePendingRef ? refSpinsSetting : undefined,
+        sourcePlatform: activePlatform,
+        cloudDocId: deterministicDocId,
+        idempotencyKey: deterministicDocId,
+      };
+      if (isOnline) {
+        void saveGuestCloudOrder(cloudOrderPayload)
+          .then(({ cloudDocId }) => {
+            setHomeOrders((prev) =>
+              prev.map((o) => (o.id === record.id ? { ...o, cloudDocId } : o))
+            );
+          })
+          .catch(() => {
+            setPendingSyncQueue((q) =>
+              enqueuePendingSyncItem(q, {
+                kind: 'order',
+                recordId: record.id,
+                payload: cloudOrderPayload,
+                enqueuedAt: Date.now(),
+              })
+            );
+          });
+      } else {
+        setPendingSyncQueue((q) =>
+          enqueuePendingSyncItem(q, {
+            kind: 'order',
+            recordId: record.id,
+            payload: cloudOrderPayload,
+            enqueuedAt: Date.now(),
+          })
+        );
+      }
+    }
 
     const earnedPoints =
       cafeData.settings.loyaltyEnabled !== false
@@ -2169,8 +2558,8 @@ export default function App() {
       }));
       const profile: SavedHomeCustomerProfile = {
         gmail: normGmail,
-        customerName: homeDetails.customerName.trim(),
-        alternatePhone: homeDetails.alternatePhone.trim(),
+        customerName: resolvedName,
+        alternatePhone: resolvedPhone,
         ward: cleanWard,
         area: cleanArea,
         wardArea: cleanWardArea,
@@ -2195,7 +2584,7 @@ export default function App() {
     scheduleRatingPopup({
       orderMode: 'home',
       orderCode: record.orderCode,
-      defaultName: homeDetails.customerName.trim(),
+      defaultName: resolvedName,
       earnedPoints,
     });
   };
@@ -3142,6 +3531,18 @@ export default function App() {
                     </span>
                   </a>
                   <PWAInstallButton />
+                  <button
+                    type="button"
+                    onClick={() => setProfileModalMode('edit')}
+                    className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-white hover:bg-stone-50 border border-stone-200 text-stone-800 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <UserIcon className="w-3.5 h-3.5 text-[#15803D]" />
+                    <span>
+                      {customerProfile
+                        ? `${customerProfile.customerName} · ${customerProfile.ward}`
+                        : 'My Profile'}
+                    </span>
+                  </button>
                 </div>
               </div>
 
@@ -4006,8 +4407,19 @@ export default function App() {
         loyalty={loyalty}
         tableNumber={tableNumber}
         onTableNumberChange={setTableNumber}
+        customerName={dineInName}
+        onCustomerNameChange={setDineInName}
         customerPhone={dineInPhone}
         onCustomerPhoneChange={setDineInPhone}
+        ward={dineInWard}
+        onWardChange={setDineInWard}
+        area={dineInArea}
+        onAreaChange={setDineInArea}
+        hasSavedProfile={Boolean(customerProfile)}
+        onOpenEditProfile={() => {
+          setIsDineInDrawerOpen(false);
+          setProfileModalMode('edit');
+        }}
         customerNote={customerNote}
         onCustomerNoteChange={setCustomerNote}
         redeemPoints={dineInRedeemPoints}
@@ -4056,6 +4468,11 @@ export default function App() {
         settings={cafeData.settings}
         loyalty={loyalty}
         details={homeDetails}
+        savedProfile={customerProfile}
+        onOpenEditProfile={() => {
+          setIsHomeDrawerOpen(false);
+          setProfileModalMode('edit');
+        }}
         savedGmails={savedGmailsList}
         loadedProfileGmail={loadedProfileGmail}
         lastOrderAt={lastOrderAt}
@@ -4073,6 +4490,20 @@ export default function App() {
         onRemoveLine={handleRemoveHomeLine}
         onRecordHomeOrder={handleRecordHomeOrder}
         onClearCart={handleClearHomeCart}
+      />
+
+      {/* Mandatory First-Launch / Saved Customer Profile Modal */}
+      <CustomerProfileModal
+        isOpen={profileModalMode !== null}
+        mode={profileModalMode || 'edit'}
+        initialProfile={customerProfile}
+        onSaveProfile={handleSaveCustomerProfile}
+        onRestoreFromFirebase={handleRestoreProfileFromFirebase}
+        onClose={
+          profileModalMode === 'edit'
+            ? () => setProfileModalMode(null)
+            : undefined
+        }
       />
 
       {/* Post-Order Rating Modal */}

@@ -132,6 +132,21 @@ export function formatPhoneDisplay(phoneNumber?: string | null): string {
   return phoneNumber;
 }
 
+export function buildCustomerTelUrl(rawPhone?: string | null): string | null {
+  if (!rawPhone) return null;
+  const digits = rawPhone.replace(/\D/g, '');
+  if (digits.length === 10 && /^[6-9]\d{9}$/.test(digits)) {
+    return `tel:+91${digits}`;
+  }
+  if (digits.length === 12 && digits.startsWith('91') && /^[6-9]\d{9}$/.test(digits.slice(2))) {
+    return `tel:+${digits}`;
+  }
+  if (digits.length >= 10) {
+    return `tel:+${digits}`;
+  }
+  return null;
+}
+
 
 export function formatItemsForCloudOrder(items: OrderLineItem[]): string {
   return items
@@ -274,6 +289,7 @@ export interface SaveCloudOrderInput {
   orderCode: string;
   orderMode: 'dine-in' | 'home';
   items: OrderLineItem[];
+  profileId?: string;
   customerName?: string;
   alternatePhone?: string;
   gmail?: string;
@@ -503,6 +519,7 @@ export function subscribeAdminCloudOrders(
             id: `cloud-${docSnap.id}`,
             orderCode: String(d.orderCode || docSnap.id),
             timestamp: ts,
+            profileId: d.profileId ? String(d.profileId) : undefined,
             gmail: d.gmail ? String(d.gmail) : undefined,
             customerName: String(d.customerName || 'Cafe Customer'),
             alternatePhone: String(
@@ -546,10 +563,16 @@ export function subscribeAdminCloudOrders(
             id: `cloud-${docSnap.id}`,
             orderCode: String(d.orderCode || docSnap.id),
             timestamp: ts,
+            profileId: d.profileId ? String(d.profileId) : undefined,
             tableNumber: String(d.tableNumber || 'Counter / Walk-in'),
+            customerName: d.customerName ? String(d.customerName) : undefined,
             customerPhone: String(
-              d.alternatePhone || d.verifiedPhone || ''
+              d.alternatePhone || extractLocal10FromE164(String(d.verifiedPhone || '')) || ''
             ),
+            ward: d.ward ? String(d.ward) : undefined,
+            area: d.area ? String(d.area) : undefined,
+            wardArea: d.wardArea ? String(d.wardArea) : undefined,
+            deliveryAddress: d.deliveryAddress ? String(d.deliveryAddress) : undefined,
             customerNote: String(d.customerNote || ''),
             items,
             newOrderAmount: totalAmount,

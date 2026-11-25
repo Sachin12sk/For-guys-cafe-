@@ -15,6 +15,7 @@ import {
   QrCode,
   Phone,
   Smartphone,
+  UserCheck,
 } from 'lucide-react';
 import type {
   CafeSettings,
@@ -30,6 +31,7 @@ import {
 } from '../utils/whatsapp';
 import {
   detectHighQuantityItems,
+  validateCustomerName,
   validateIndianMobileNumber,
 } from '../utils/security';
 import { calculatePointsRedemption } from '../utils/loyalty';
@@ -55,8 +57,16 @@ interface BasketDrawerProps {
   settings: CafeSettings;
   tableNumber: string;
   onTableNumberChange: (val: string) => void;
+  customerName: string;
+  onCustomerNameChange: (val: string) => void;
   customerPhone: string;
   onCustomerPhoneChange: (val: string) => void;
+  ward: string;
+  onWardChange: (val: string) => void;
+  area: string;
+  onAreaChange: (val: string) => void;
+  hasSavedProfile?: boolean;
+  onOpenEditProfile?: () => void;
   customerNote: string;
   onCustomerNoteChange: (val: string) => void;
   loyalty?: LoyaltyState;
@@ -81,8 +91,16 @@ export function BasketDrawer({
   settings,
   tableNumber,
   onTableNumberChange,
+  customerName,
+  onCustomerNameChange,
   customerPhone,
   onCustomerPhoneChange,
+  ward,
+  onWardChange,
+  area,
+  onAreaChange,
+  hasSavedProfile,
+  onOpenEditProfile,
   customerNote,
   onCustomerNoteChange,
   loyalty,
@@ -167,11 +185,10 @@ export function BasketDrawer({
 
   if (!isOpen) return null;
 
+  const trimmedName = customerName.trim();
   const trimmedPhone = customerPhone.trim();
-  const phoneCheck =
-    trimmedPhone.length > 0
-      ? validateIndianMobileNumber(trimmedPhone)
-      : { valid: true, normalized: '', reason: undefined as string | undefined };
+  const nameCheck = validateCustomerName(trimmedName);
+  const phoneCheck = validateIndianMobileNumber(trimmedPhone);
 
   const threshold = Math.max(1, Number(settings.highQuantityThreshold ?? 10));
   const highQty = detectHighQuantityItems(
@@ -184,7 +201,10 @@ export function BasketDrawer({
     pointsDiscount: redemption.discountAmount,
     paymentMethod: effectivePaymentMethod,
     upiRefNote,
+    customerName: trimmedName,
     customerPhone: trimmedPhone,
+    ward: ward.trim(),
+    area: area.trim(),
   };
 
   const whatsappUrl = buildWhatsappOrderUrl(
@@ -229,9 +249,10 @@ export function BasketDrawer({
   const isCafeOpen = settings.isCafeOpen !== false;
 
   const handleOrderOnWhatsapp = (e: MouseEvent<HTMLAnchorElement>) => {
-    // Block if cafe is closed, phone invalid, honeypot field populated, or rapid double-submit
+    // Block if cafe is closed, name/phone invalid, honeypot field populated, or rapid double-submit
     if (
       !isCafeOpen ||
+      !nameCheck.valid ||
       !phoneCheck.valid ||
       honeypot.trim().length > 0 ||
       isSubmittingRef.current
@@ -577,6 +598,29 @@ export function BasketDrawer({
                   />
                 </div>
 
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-bold text-stone-900 uppercase tracking-wider">
+                    Dine-In Guest &amp; Table Details
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {hasSavedProfile && (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#15803D]">
+                        <UserCheck className="w-3.5 h-3.5" />
+                        <span>Profile Auto-Filled</span>
+                      </span>
+                    )}
+                    {onOpenEditProfile && (
+                      <button
+                        type="button"
+                        onClick={onOpenEditProfile}
+                        className="text-[11px] font-semibold text-[#C83E2B] hover:underline"
+                      >
+                        Edit Profile
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 <div>
                   <label
                     htmlFor="basket-table"
@@ -594,31 +638,97 @@ export function BasketDrawer({
                   />
                 </div>
 
-                <div>
-                  <label
-                    htmlFor="basket-phone"
-                    className="block text-xs font-semibold text-stone-700 mb-1"
-                  >
-                    Customer Mobile for WhatsApp Bill Receipt (Optional)
-                  </label>
-                  <div className="relative">
-                    <Phone className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label
+                      htmlFor="basket-customer-name"
+                      className="block text-xs font-semibold text-stone-700 mb-1"
+                    >
+                      Customer Name *
+                    </label>
                     <input
-                      id="basket-phone"
-                      type="tel"
-                      inputMode="numeric"
-                      maxLength={14}
-                      value={customerPhone}
-                      onChange={(e) => onCustomerPhoneChange(e.target.value)}
-                      placeholder="10-digit mobile for digital receipt"
-                      className="w-full min-h-[44px] pl-9 pr-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                      id="basket-customer-name"
+                      type="text"
+                      maxLength={80}
+                      value={customerName}
+                      onChange={(e) => onCustomerNameChange(e.target.value)}
+                      placeholder="e.g. Aarav Tiwari"
+                      className={`w-full min-h-[42px] px-3 py-2 rounded-xl border bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white ${
+                        !nameCheck.valid ? 'border-[#C83E2B]/70' : 'border-stone-200'
+                      }`}
+                    />
+                    {!nameCheck.valid && (
+                      <p className="text-[11px] font-medium text-[#C83E2B] mt-1">
+                        {nameCheck.reason}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="basket-phone"
+                      className="block text-xs font-semibold text-stone-700 mb-1"
+                    >
+                      Mobile Number *
+                    </label>
+                    <div className="relative">
+                      <Phone className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        id="basket-phone"
+                        type="tel"
+                        inputMode="numeric"
+                        maxLength={14}
+                        value={customerPhone}
+                        onChange={(e) => onCustomerPhoneChange(e.target.value)}
+                        placeholder="10-digit mobile"
+                        className={`w-full min-h-[42px] pl-9 pr-3 py-2 rounded-xl border bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white ${
+                          !phoneCheck.valid ? 'border-[#C83E2B]/70' : 'border-stone-200'
+                        }`}
+                      />
+                    </div>
+                    {!phoneCheck.valid && (
+                      <p className="text-[11px] font-medium text-[#C83E2B] mt-1">
+                        {phoneCheck.reason || 'Enter a valid 10-digit Indian mobile number.'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label
+                      htmlFor="basket-ward"
+                      className="block text-xs font-semibold text-stone-700 mb-1"
+                    >
+                      Ward Number
+                    </label>
+                    <input
+                      id="basket-ward"
+                      type="text"
+                      maxLength={60}
+                      value={ward}
+                      onChange={(e) => onWardChange(e.target.value)}
+                      placeholder="e.g. Ward 4"
+                      className="w-full min-h-[40px] px-3 py-1.5 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
                     />
                   </div>
-                  {trimmedPhone.length > 0 && !phoneCheck.valid && (
-                    <p className="text-[11px] font-medium text-[#C83E2B] mt-1">
-                      {phoneCheck.reason || 'Enter a valid 10-digit Indian mobile number or leave blank.'}
-                    </p>
-                  )}
+                  <div>
+                    <label
+                      htmlFor="basket-area"
+                      className="block text-xs font-semibold text-stone-700 mb-1"
+                    >
+                      Area / Mohalla
+                    </label>
+                    <input
+                      id="basket-area"
+                      type="text"
+                      maxLength={100}
+                      value={area}
+                      onChange={(e) => onAreaChange(e.target.value)}
+                      placeholder="e.g. Main Market"
+                      className="w-full min-h-[40px] px-3 py-1.5 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-[#C83E2B] focus:bg-white"
+                    />
+                  </div>
                 </div>
 
                 <div>
@@ -840,13 +950,17 @@ export function BasketDrawer({
                 <Store className="w-4 h-4" />
                 <span>Cafe Currently Closed — Orders Paused</span>
               </button>
-            ) : !phoneCheck.valid ? (
+            ) : !nameCheck.valid || !phoneCheck.valid ? (
               <button
                 type="button"
                 disabled
                 className="w-full min-h-[48px] px-5 py-3 rounded-xl bg-stone-200 text-stone-600 font-semibold text-sm flex items-center justify-center gap-2 cursor-not-allowed"
               >
-                <span>Enter valid 10-digit mobile above or leave blank</span>
+                <span>
+                  {!nameCheck.valid
+                    ? nameCheck.reason || 'Enter Customer Name above to order'
+                    : phoneCheck.reason || 'Enter a valid 10-digit mobile number above'}
+                </span>
               </button>
             ) : (
               <a
